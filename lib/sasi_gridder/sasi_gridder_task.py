@@ -3,10 +3,13 @@ Task for gridding SASI Efforts.
 """
 
 # TODO: use custom dao for adding nemareas.
-from sasi_data.dao.sasi_sa_dao import SASI_SqlAlchemyDAO
+from sasi_gridder.dao import SASIGridderDAO
+from sasi_gridder import models as models
 import task_manager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import sasi_data.ingestors as ingestors
+import sasi_data.util.gis as gis_util
 
 import tempfile
 import os
@@ -25,19 +28,34 @@ class LoggerLogHandler(logging.Handler):
     def emit(self, record):
         self.logger.log(record.levelno, self.format(record))
 
-class SasiGridderTask(task_manager.Task):
+class SASIGridderTask(task_manager.Task):
 
     def __init__(self, config={}, data={}, 
-                 get_connection=None, max_mem=1e9, config={},
-                 **kwargs):
-        super(RunSasiTask, self).__init__(**kwargs)
+                 get_connection=None, max_mem=1e9, **kwargs):
+        super(SASIGridderTask, self).__init__(**kwargs)
         self.logger.debug("RunSasiTask.__init__")
 
         self.data = data
         self.config = config
-        self.value_attrs = ['a', 'value', 'hours_fished']
+        self.value_attrs = models.Effort.value_attrs
 
-        for kwarg in ['raw_efforts_path', 'grid_path', 'nemareas_path']:
+        # Define trip type to gear code mappings.
+        # @TODO: put this in config.
+        self.trip_type_gear_mappings = {
+            'hy_drg': 'GC30',
+            'otter': 'GC10',
+            'sca-gc': 'GC21',
+            'sca-la': 'GC20',
+            'shrimp': 'GC11',
+            'squid': 'GC12',
+            'raised': 'GC13',
+            'trap': 'GC60',
+            'gillne': 'GC50',
+            'longli': 'GC40',
+        }
+
+        for kwarg in ['raw_efforts_path', 'grid_path', 'stat_areas_path',
+                      'output_path']:
             setattr(self, kwarg, kwargs.get(kwarg))
 
         if not self.output_path:
@@ -74,13 +92,20 @@ class SasiGridderTask(task_manager.Task):
         # Read in data.
         try:
             base_msg = "Ingesting..."
-            ingest_logger = self.get_logger_for_stage('ingest', base_msg)
+            ingest_logger = self.get_logger_logger('ingest', base_msg,
+                                                   self.logger)
             self.message_logger.info(base_msg)
-            # TODO: use custom DAO and ingestor.
-            #dao = SASI_SqlAlchemyDAO(session=session)
-            dao = none
-            #sasi_ingestor.ingest(data_dir=data_dir)
-            ingestor = None
+            self.dao = SASIGridderDAO(session=session)
+
+            # Read in cells.
+            self.ingest_cells(parent_logger=ingest_logger)
+
+            # Read in stat_areas.
+            self.ingest_stat_areas(parent_logger=ingest_logger)
+
+            # Read in raw_efforts.
+            self.ingest_raw_efforts(parent_logger=ingest_logger)
+
         except Exception as e:
             self.logger.exception("Error ingesting")
             raise e
@@ -126,7 +151,7 @@ class SasiGridderTask(task_manager.Task):
                 # If effort has lat and lon...
                 if effort.lat is not None and effort.lon is not None:
                     # Can effort can be assigned to cell?
-                    cell = self.get_cell_for_effort(effort.lat, effort.lon):
+                    cell = self.get_cell_for_effort(effort.lat, effort.lon)
                     if cell:
                         self.add_effort_to_cell(cell, effort)
                         continue
@@ -144,7 +169,7 @@ class SasiGridderTask(task_manager.Task):
                         continue
 
                 # Otherwise if effort has a stat area...
-                else if effort.stat_area is not None:
+                elif effort.stat_area is not None:
                     self.add_effort_to_stat_area(effort.stat_area, effort)
 
                 # Otherwise add to unassigned list.
@@ -168,7 +193,7 @@ class SasiGridderTask(task_manager.Task):
 
                 # Calculate totals for efforts assigned to the stat area.
                 stat_area_totals = {}
-                for effort_key, effort_values in stat_area.aggregates.items():
+                for effort_key, effort_values in stat_area.keyed_values.items():
                     stat_area_values = stat_area_totals.setdefault(
                         effort_key,
                         self.new_values_dict()
@@ -182,7 +207,7 @@ class SasiGridderTask(task_manager.Task):
                 # Calculate totals for values across cracked cells.
                 ccell_totals = {}
                 for ccell in cracked_cells:
-                    for effort_key, ccell_values in ccell.aggregates.items():
+                    for effort_key, ccell_values in ccell.keyed_values.items():
                         ccell_totals_values = ccell_totals.setdefault(
                             effort_key,
                             self.new_values_dict()
@@ -194,8 +219,8 @@ class SasiGridderTask(task_manager.Task):
                 # cells, in proportion to the cracked cell's values as a
                 # percentage of the stat area's cracked cell totals.
                 for ccell in cracked_cells:
-                    for effort_key, sa_values in stat_area.aggregates.items():
-                        ccell_values = ccell.aggregates.get(effort_key)
+                    for effort_key, sa_values in stat_area.keyed_values.items():
+                        ccell_values = ccell.keyed_values.get(effort_key)
                         if not ccell_values:
                             continue
                         for attr, sa_value in sa_values.items():
@@ -234,7 +259,7 @@ class SasiGridderTask(task_manager.Task):
             # Calculate totals across all cells.
             totals = {}
             for cell in cells:
-                for effort_key, cell_values in cell.aggregates.items():
+                for effort_key, cell_values in cell.keyed_values.items():
                     totals_values = totals.setdefault(
                         effort_key, 
                         self.get_new_values_dict()
@@ -246,7 +271,7 @@ class SasiGridderTask(task_manager.Task):
             # in proportion to the cell's values as a percentage of the total.
             for effort_key, unassigned_values in unassigned.items():
                 for cell in cells:
-                    cell_values = cell.aggregates.get(effort_key)
+                    cell_values = cell.keyed_values.get(effort_key)
                     if not cell_values:
                         continue
                     for attr, unassigned_value in unassigned_values.items():
@@ -279,10 +304,10 @@ class SasiGridderTask(task_manager.Task):
             self.output_path))
         self.status = 'resolved'
 
-    def get_logger_for_stage(self, stage_id=None, base_msg=None):
-        logger = logging.getLogger("%s_%s" % (id(self), stage_id))
+    def get_logger_logger(self, name=None, base_msg=None, parent_logger=None):
+        logger = logging.getLogger("%s_%s" % (id(self), name))
         formatter = logging.Formatter(base_msg + ' %(message)s.')
-        log_handler = LoggerLogHandler(self.message_logger)
+        log_handler = LoggerLogHandler(parent_logger)
         log_handler.setFormatter(formatter)
         logger.addHandler(log_handler)
         logger.setLevel(self.message_logger.level)
@@ -300,21 +325,21 @@ class SasiGridderTask(task_manager.Task):
     def new_values_dict(self):
         return dict(zip(self.value_attrs, [0.0] * len(self.value_attrs)))
 
-    def add_effort_values(self, values, effort):
-        for k in values.keys():
+    def update_values_dict(self, values_dict, effort):
+        for k in values_dict.keys():
             effort_value = getattr(effort, k, 0.0)
-            values[k] += effort_value
+            values_dict[k] += effort_value
 
-    def add_effort_to_obj(self, obj, effort, aggregates_attr='aggregates'):
-        aggregates_dict = getattr(obj, aggregates_attr)
-        self.add_effort_dict(aggregates_dict, effort)
+    def add_effort_to_obj(self, obj, effort, keyed_values_attr='keyed_values'):
+        keyed_values_dict = getattr(obj, keyed_values_attr)
+        self.add_effort_to_keyed_values_dict(keyed_values_dict, effort)
 
-    def add_effort_to_dict(self, dict_, effort):
-        values = dict_.setdefault(
+    def add_effort_to_keyed_values_dict(self, kvd, effort):
+        values = kvd.setdefault(
             self.get_effort_key(effort), 
             self.new_values_dict()
         )
-        self.add_effort_values(values, effort)
+        self.udpate_values_dict(values, effort)
 
     def add_effort_to_cell(self, cell, effort):
         self.add_effort_to_obj(cell, effort)
@@ -323,8 +348,85 @@ class SasiGridderTask(task_manager.Task):
         self.add_effort_to_obj(stat_area, effort)
 
     def add_effort_to_unassigned(self, unassigned, effort):
-        self.add_effort_to_dict(unassigned, effort)
+        self.add_effort_to_keyed_values_dict(unassigned, effort)
 
     def get_effort_key(self, effort):
-        """  Aggregate key for grouping efforts. """
+        """  Key for grouping values by effort types. """
         return (effort.gear_id,)
+
+    def ingest_cells(self, parent_logger=None):
+        logger = self.get_logger_logger(
+            name='cell_ingest', 
+            base_msg='Ingesting cells...',
+            parent_logger=parent_logger
+        )
+        ingestor = ingestors.Shapefile_Ingestor(
+            dao=self.dao,
+            shp_file=self.grid_path,
+            clazz=self.dao.schema['sources']['Cell'],
+            reproject_to='EPSG:4326',
+            mappings=[
+                {'source': 'TYPE', 'target': 'type'},
+                {'source': 'TYPE_ID', 'target': 'type_id', 'processor': int},
+            ],
+            logger=logger,
+            commit_interval=1e3,
+        ) 
+        ingestor.ingest()
+
+    def ingest_stat_areas(self, parent_logger=None):
+        logger = self.get_logger_logger(
+            name='stat_area_ingest', 
+            base_msg='Ingesting stat_areas...',
+            parent_logger=parent_logger
+        )
+        ingestor = ingestors.Shapefile_Ingestor(
+            dao=self.dao,
+            shp_file=self.stat_areas_path,
+            clazz=self.dao.schema['sources']['StatArea'],
+            reproject_to='EPSG:4326',
+            mappings=[
+                {'source': 'SAREA', 'target': 'id', 'processor': int},
+            ],
+            logger=logger,
+            commit_interval=1e3,
+        ) 
+        ingestor.ingest()
+
+    def ingest_raw_efforts(self, parent_logger=None):
+        logger = self.get_logger_logger(
+            name='raw_effort_ingest', 
+            base_msg='Ingesting raw efforts...',
+            parent_logger=parent_logger
+        )
+
+        # Define mappings form trip types to gear codes.
+        def trip_type_to_gear_id(trip_type):
+            return self.trip_type_gear_mappings.get(trip_type)
+
+        def robust_float(raw_str):
+            try:
+                return float(a)
+            except:
+                return 0.0
+
+        ingestor = ingestors.DAO_CSV_Ingestor(
+            dao=self.dao, 
+            csv_file=self.raw_efforts_path,
+            clazz=self.dao.schema['sources']['Effort'],
+            mappings=[
+                {'source': 'trip_type', 'target': 'gear_id', 
+                 'processor': trip_type_to_gear_id},
+                {'source': 'year', 'target': 'time'},
+                {'source': 'nemarea', 'target': 'stat_area_id'},
+                {'source': 'A', 'target': 'a', 'processor': robust_float},
+                {'source': 'value', 'target': 'value', 'processor': robust_float},
+                {'source': 'hours_fished', 'target': 'hours_fished', 
+                 'processor': robust_float},
+            ],
+            logger=logger,
+            get_count=True,
+            commit_interval=1e4,
+            limit=1e4
+        ) 
+        ingestor.ingest()

@@ -87,6 +87,8 @@ class SASIGridderDAO(ORM_DAO):
                            Column('hours_fished', Float),
                            Column('value', Float),
                            Column('time', Integer),
+                           Column('lat', Float),
+                           Column('lon', Float),
                           ),
         }
 

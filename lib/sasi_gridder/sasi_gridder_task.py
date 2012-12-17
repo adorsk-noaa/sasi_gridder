@@ -8,6 +8,7 @@ from sasi_gridder import models as models
 import task_manager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import func 
 import sasi_data.ingestors as ingestors
 import sasi_data.util.gis as gis_util
 
@@ -113,7 +114,8 @@ class SASIGridderTask(task_manager.Task):
         # Grid the efforts
         try:
             base_msg = "Starting gridding."
-            run_model_logger = self.get_logger_for_stage('gridding', base_msg)
+            gridding_logger = self.get_logger_logger('gridding', base_msg,
+                                                      self.logger)
             self.message_logger.info(base_msg)
 
             #
@@ -146,12 +148,15 @@ class SASIGridderTask(task_manager.Task):
 
             unassigned = {}
 
-            for effort in raw_efforts:
+            batched_efforts = self.dao.get_batched_results(
+                self.dao.session.query(self.dao.schema['sources']['Effort']),
+                1e4)
+            for effort in batched_efforts:
 
                 # If effort has lat and lon...
                 if effort.lat is not None and effort.lon is not None:
                     # Can effort can be assigned to cell?
-                    cell = self.get_cell_for_effort(effort.lat, effort.lon)
+                    cell = self.get_cell_for_pos(effort.lat, effort.lon)
                     if cell:
                         self.add_effort_to_cell(cell, effort)
                         continue
@@ -313,10 +318,14 @@ class SASIGridderTask(task_manager.Task):
         logger.setLevel(self.message_logger.level)
         return logger
 
+    # HERE! GOTTA FIGURE OUT CELLS.
     def get_cell_for_pos(self, lat, lon):
         """ Get cell which contains a given lat lon.
         Returns None if no cell could be found."""
-        pass
+        Cell = self.dao.schema['sources']['Cell']
+        pos_wkt = 'POINT(%s %s)' % (lon, lat)
+        cells = self.dao.session.query(Cell).filter(func.ST_Contains(
+            Cell.geom, func.ST_GeomFromText(pos_wkt, '4326'))).all()
 
     def get_statarea_for_pos(self, lat, lon):
         """ Get statarea which contains a given lat lon.
@@ -371,8 +380,10 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=logger,
             commit_interval=1e3,
+            limit=1e3,
         ) 
         ingestor.ingest()
+        self.dao.commit()
 
     def ingest_stat_areas(self, parent_logger=None):
         logger = self.get_logger_logger(
@@ -392,6 +403,7 @@ class SASIGridderTask(task_manager.Task):
             commit_interval=1e3,
         ) 
         ingestor.ingest()
+        self.dao.commit()
 
     def ingest_raw_efforts(self, parent_logger=None):
         logger = self.get_logger_logger(
@@ -406,7 +418,7 @@ class SASIGridderTask(task_manager.Task):
 
         def robust_float(raw_str):
             try:
-                return float(a)
+                return float(raw_str)
             except:
                 return 0.0
 
@@ -417,16 +429,18 @@ class SASIGridderTask(task_manager.Task):
             mappings=[
                 {'source': 'trip_type', 'target': 'gear_id', 
                  'processor': trip_type_to_gear_id},
-                {'source': 'year', 'target': 'time'},
+                {'source': 'year', 'target': 'time', 'processor': int},
                 {'source': 'nemarea', 'target': 'stat_area_id'},
                 {'source': 'A', 'target': 'a', 'processor': robust_float},
                 {'source': 'value', 'target': 'value', 'processor': robust_float},
                 {'source': 'hours_fished', 'target': 'hours_fished', 
                  'processor': robust_float},
+                {'source': 'lat', 'target': 'lat', 'processor': robust_float},
+                {'source': 'lon', 'target': 'lon', 'processor': robust_float},
             ],
             logger=logger,
             get_count=True,
             commit_interval=1e4,
-            limit=1e4
+            limit=1e2
         ) 
         ingestor.ingest()

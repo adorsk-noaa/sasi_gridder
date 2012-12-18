@@ -5,6 +5,7 @@ import logging
 import tempfile
 import shutil
 import os
+import csv
 
 
 def frange(*args):
@@ -32,6 +33,20 @@ def frange(*args):
 class SASIGridderTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(clz):
+        """ 
+        Creates:
+            - grid of 4 cells, each of width 2, w/
+            bottom left at 0,0.
+            - 4 stat areas, each of width 2, w/ bottom left
+            at 0,-1.
+            - raw efforts
+                - efforts w/ lat/lon in cell, 1 per cell.
+                - efforts w/ lat/lon in stat area gutters outide of grid,
+                1 per gutter.
+                - efforts w/ no lat/lon, but nemarea,
+                1 per nemarea.
+                - efforts w/ no lat/lon, no nemarea, 1
+        """
         clz.tmp_dir = tempfile.mkdtemp(prefix="sgTest.")
         clz.grid_path = clz.generateMockGrid(clz.tmp_dir)
         clz.stat_areas_path = clz.generateMockStatAreas(clz.tmp_dir)
@@ -116,7 +131,22 @@ class SASIGridderTestCase(unittest.TestCase):
 
     @classmethod
     def generateMockRawEfforts(clz, dir_):
-        pass
+        csv_path = os.path.join(dir_, 'raw_efforts.csv')
+        csv_file = open(csv_path, "w")
+        w = csv.writer(csv_file)
+        fields = ['nemarea', 'trip_type', 'a', 'hours_fished', 'value', 
+                  'year', 'lat', 'lon']
+        records = [
+            # lat/lon in cell 1
+            {'lat': 1, 'lon': 1},
+            # lat/lon out of cell, in stat area
+            {'lat': 1, 'lon': 1}
+            # lat/lon out of cell, out of stat area
+            # stat area
+            # no lat/lon, no stat area
+        ]
+
+        return csv_path
 
     def test_foo(self):
         print "foo"

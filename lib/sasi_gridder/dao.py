@@ -50,7 +50,9 @@ class SASIGridderDAO(ORM_DAO):
             'table': Table('cell', self.metadata,
                            Column('id', Integer, primary_key=True),
                            Column('area', Float),
-                           Column('keyed_values', PickleType),
+                           # Note: if upgrade to SA 8,
+                           # mutable types have changed...watch out.
+                           Column('keyed_values', PickleType(mutable=True)),
                            GeometryExtensionColumn('geom', MultiPolygon(2)),
                           ),
             'is_spatial': True,
@@ -65,7 +67,7 @@ class SASIGridderDAO(ORM_DAO):
         mappings['StatArea'] = {
             'table': Table('stat_area', self.metadata,
                            Column('id', Integer, primary_key=True),
-                           Column('keyed_values', PickleType),
+                           Column('keyed_values', PickleType(mutable=True)),
                            GeometryExtensionColumn('geom', MultiPolygon(2)),
                           ),
             'is_spatial': True,

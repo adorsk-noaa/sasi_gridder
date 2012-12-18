@@ -1,5 +1,8 @@
+from sasi_gridder.sasi_gridder_task import SASIGridderTask
 from sasi_data.util import data_generators as dg
 import sasi_data.util.shapefile as shapefile_util
+from sqlalchemy import create_engine
+import sys
 import unittest
 import logging
 import tempfile
@@ -33,24 +36,10 @@ def frange(*args):
 class SASIGridderTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(clz):
-        """ 
-        Creates:
-            - grid of 4 cells, each of width 2, w/
-            bottom left at 0,0.
-            - 4 stat areas, each of width 2, w/ bottom left
-            at 0,-1.
-            - raw efforts
-                - efforts w/ lat/lon in cell, 1 per cell.
-                - efforts w/ lat/lon in stat area gutters outide of grid,
-                1 per gutter.
-                - efforts w/ no lat/lon, but nemarea,
-                1 per nemarea.
-                - efforts w/ no lat/lon, no nemarea, 1
-        """
         clz.tmp_dir = tempfile.mkdtemp(prefix="sgTest.")
         clz.grid_path = clz.generateMockGrid(clz.tmp_dir)
         clz.stat_areas_path = clz.generateMockStatAreas(clz.tmp_dir)
-        #clz.efforts_path = clz.generateMockRawEfforts(clz.tmp_dir)
+        clz.raw_efforts_path = clz.generateMockRawEfforts(clz.tmp_dir)
 
     @classmethod
     def tearDownClass(clz):
@@ -59,7 +48,7 @@ class SASIGridderTestCase(unittest.TestCase):
             #shutil.rmtree(clz.tmp_dir)
 
     @classmethod
-    def generateMockGrid(clz, dir_, x0=0, xf=4, dx=2, y0=0, yf=4, dy=2):
+    def generateMockGrid(clz, dir_):
         shpfile = os.path.join(dir_, "grid.shp")
         schema = {
             'geometry': 'MultiPolygon',
@@ -67,50 +56,47 @@ class SASIGridderTestCase(unittest.TestCase):
                 'ID': 'int'
             }
         }
+        coord_sets = [
+            [[dg.generate_polygon_coords(x=0, dx=2, y=-1, dy=1)]],
+            [[dg.generate_polygon_coords(x=0, dx=2, y=0, dy=1)]]
+        ]
         records = []
         i = 0
-        for j in frange(x0, xf, dx):
-            for k in frange(y0, yf, dy):
-                coords = [[dg.generate_polygon_coords(x=j, dx=dx, y=k, dy=dy)]]
-                records.append({
-                    'id': i,
-                    'geometry': {
-                        'type': 'MultiPolygon',
-                        'coordinates': coords
-                    },
-                    'properties': {
-                        'ID': i
-                    }
-                })
-                i += 1
+        for coord_set in coord_sets:
+            records.append({
+                'id': i,
+                'geometry': {
+                    'type': 'MultiPolygon',
+                    'coordinates': coord_set
+                },
+                'properties': {
+                    'ID': i
+                }
+            })
+            i += 1
         return clz.generate_shapefile(shpfile=shpfile, schema=schema,
                                       records=records)
 
     @classmethod
-    def generateMockStatAreas(clz, dir_, x0=0, xf=4, dx=2, y0=1, yf=3, dy=2):
+    def generateMockStatAreas(clz, dir_):
         shpfile = os.path.join(dir_, "stat_areas.shp")
         schema = {
             'geometry': 'MultiPolygon',
             'properties': {
-                'ID': 'int'
+                'SAREA': 'int'
             }
         }
-        records = []
-        i = 0
-        for j in frange(x0, xf, dx):
-            for k in frange(y0, yf, dy):
-                coords = [[dg.generate_polygon_coords(x=j, y=k, dx=dx, dy=dy)]]
-                records.append({
-                    'id': i,
-                    'geometry': {
-                        'type': 'MultiPolygon',
-                        'coordinates': coords
-                    },
-                    'properties': {
-                        'ID': i
-                    }
-                })
-                i += 1
+        coords = [[dg.generate_polygon_coords(x=1, dx=2, y=-1, dy=2)]]
+        records = [{
+            'id': 1,
+            'geometry': {
+                'type': 'MultiPolygon',
+                'coordinates': coords
+            },
+            'properties': {
+                'SAREA': 1
+            }
+        }]
         return clz.generate_shapefile(shpfile=shpfile, schema=schema,
                                       records=records)
     
@@ -134,22 +120,49 @@ class SASIGridderTestCase(unittest.TestCase):
         csv_path = os.path.join(dir_, 'raw_efforts.csv')
         csv_file = open(csv_path, "w")
         w = csv.writer(csv_file)
-        fields = ['nemarea', 'trip_type', 'a', 'hours_fished', 'value', 
+        fields = ['nemarea', 'trip_type', 'A', 'hours_fished', 'value', 
                   'year', 'lat', 'lon']
         records = [
-            # lat/lon in cell 1
-            {'lat': 1, 'lon': 1},
-            # lat/lon out of cell, in stat area
-            {'lat': 1, 'lon': 1}
-            # lat/lon out of cell, out of stat area
-            # stat area
-            # no lat/lon, no stat area
+            # Cell A
+            {'lat': .5, 'lon': .5, 'A': 1},
+            # Cell B
+            {'lat': -.5, 'lon': .5, 'A': 2},
+            # Stat Area 1
+            {'nemarea': 1, 'A': 3},
+            # Out-of-domain
+            {'A': 6}
         ]
-
+        w.writerow(fields)
+        for r in records:
+            r['trip_type'] = 'otter'
+            w.writerow([r.get(f) for f in fields])
+        csv_file.close()
         return csv_path
 
-    def test_foo(self):
-        print "foo"
+    def test_gridder_task(self):
+
+        def get_connection():
+            import pyspatialite
+            sys.modules['pysqlite2'] = pyspatialite
+            engine = create_engine('sqlite://')
+            con = engine.connect()
+            con.execute('SELECT InitSpatialMetadata()')
+            return con
+
+        logger = logging.getLogger('test_gridder_task')
+        logger.addHandler(logging.StreamHandler())
+        logger.setLevel(logging.INFO)
+
+        output_path = os.path.join(self.tmp_dir, "output.csv")
+        task = SASIGridderTask(
+            get_connection=get_connection,
+            logger=logger,
+            raw_efforts_path=self.raw_efforts_path,
+            grid_path=self.grid_path,
+            stat_areas_path=self.stat_areas_path,
+            output_path=output_path
+        )
+        task.call()
 
 if __name__ == '__main__':
     unittest.main()

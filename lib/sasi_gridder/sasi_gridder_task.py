@@ -163,8 +163,8 @@ class SASIGridderTask(task_manager.Task):
             unassigned = {}
 
             effort_counter = 0
-            commit_interval = 1e4
-            logging_interval = 1e2
+            commit_interval = 1e5
+            logging_interval = 1e4
             efforts_q = self.dao.session.query(
                 self.dao.schema['sources']['Effort'])
             batched_efforts = self.dao.get_batched_results(
@@ -540,11 +540,16 @@ class SASIGridderTask(task_manager.Task):
             mappings=[
                 {'source': 'trip_type', 'target': 'gear_id', 
                  'processor': trip_type_to_gear_id},
-                {'source': 'year', 'target': 'time'},
-                {'source': 'nemarea', 'target': 'stat_area_id'},
-                {'source': 'A', 'target': 'a'},
-                {'source': 'value', 'target': 'value'},
-                {'source': 'hours_fished', 'target': 'hours_fished'},
+                {'source': 'year', 'target': 'time',
+                 'processor': float_w_empty_dot},
+                {'source': 'nemarea', 'target': 'stat_area_id',
+                 'processor': float_w_empty_dot},
+                {'source': 'A', 'target': 'a',
+                 'processor': float_w_empty_dot},
+                {'source': 'value', 'target': 'value',
+                 'processor': float_w_empty_dot},
+                {'source': 'hours_fished', 'target': 'hours_fished',
+                 'processor': float_w_empty_dot},
                 {'source': 'lat', 'target': 'lat', 
                  'processor': float_w_empty_dot},
                 {'source': 'lon', 'target': 'lon',
@@ -552,7 +557,7 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=logger,
             get_count=True,
-            commit_interval=1e4,
+            commit_interval=1e5,
             #limit=1e3
         ) 
         ingestor.ingest()

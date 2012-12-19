@@ -154,15 +154,29 @@ class SASIGridderTask(task_manager.Task):
             # from clean efforts.
             #
 
+            base_msg = "First pass... "
+            cells_logger = self.get_logger_logger('cells', base_msg,
+                                                  gridding_logger)
+            cells_logger.info(base_msg)
+
             unassigned = {}
 
             effort_counter = 0
             commit_interval = 1e4
+            logging_interval = 1e2
+            efforts_q = self.dao.session.query(
+                self.dao.schema['sources']['Effort'])
             batched_efforts = self.dao.get_batched_results(
-                self.dao.session.query(self.dao.schema['sources']['Effort']),
-                1e4)
+                efforts_q, commit_interval)
+            num_efforts = efforts_q.count()
+
             for effort in batched_efforts:
                 effort_counter += 1
+
+                if (effort_counter % logging_interval) == 0:
+                    cells_logger.info("effort %s of %s (%.1f%%)" % (
+                        effort_counter, num_efforts, 
+                        100.0 * effort_counter/num_efforts))
 
                 # If effort has lat and lon...
                 if effort.lat is not None and effort.lon is not None:

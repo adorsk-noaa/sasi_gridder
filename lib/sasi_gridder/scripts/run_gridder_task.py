@@ -12,6 +12,7 @@ argparser.add_argument('-e', '--raw-efforts', help='raw efforts csv',
                        required=True)
 argparser.add_argument('-s', '--stat-areas', help='stat areas shapefile',
                        required=True)
+argparser.add_argument('-o', '--output-path', help='output path')
 argparser.add_argument('--db-uri', default='sqlite://')
 
 args = argparser.parse_args()
@@ -40,6 +41,7 @@ task = SASIGridderTask(
     grid_path=args.grid,
     raw_efforts_path=args.raw_efforts,
     stat_areas_path=args.stat_areas,
+    output_path=args.output_path,
     logger=logger,
     get_connection=get_connection,
 )

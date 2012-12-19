@@ -360,6 +360,7 @@ class SASIGridderTask(task_manager.Task):
         self.progress = 100
         self.message_logger.info("Gridding completed, output file is:'%s'" % (
             self.output_path))
+        self.data['output_file'] = self.output_path
         self.status = 'resolved'
 
     def get_logger_logger(self, name=None, base_msg=None, parent_logger=None):
@@ -446,7 +447,6 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=logger,
             commit_interval=1e3,
-            limit=1e3,
         ) 
         ingestor.ingest()
         self.dao.commit()
@@ -491,6 +491,12 @@ class SASIGridderTask(task_manager.Task):
         def trip_type_to_gear_id(trip_type):
             return self.trip_type_gear_mappings.get(trip_type)
 
+        def float_w_empty_dot(value):
+            if value == '.':
+                return None
+            elif value is not None:
+                return float(value)
+
         ingestor = ingestors.DAO_CSV_Ingestor(
             dao=self.dao, 
             csv_file=self.raw_efforts_path,
@@ -503,13 +509,15 @@ class SASIGridderTask(task_manager.Task):
                 {'source': 'A', 'target': 'a'},
                 {'source': 'value', 'target': 'value'},
                 {'source': 'hours_fished', 'target': 'hours_fished'},
-                {'source': 'lat', 'target': 'lat'},
-                {'source': 'lon', 'target': 'lon'}
+                {'source': 'lat', 'target': 'lat', 
+                 'processor': float_w_empty_dot},
+                {'source': 'lon', 'target': 'lon',
+                 'processor': float_w_empty_dot}
             ],
             logger=logger,
             get_count=True,
             commit_interval=1e4,
-            limit=1e2
+            limit=1e3
         ) 
         ingestor.ingest()
 

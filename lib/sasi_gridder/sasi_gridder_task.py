@@ -9,6 +9,7 @@ import task_manager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import func 
+from sqlalchemy.sql import literal_column, select, and_
 import sasi_data.ingestors as ingestors
 import sasi_data.util.gis as gis_util
 
@@ -400,8 +401,28 @@ class SASIGridderTask(task_manager.Task):
 
     def get_obj_for_pos(self, clazz, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
-        objs = self.dao.session.query(clazz).filter(func.ST_Contains(
-            clazz.geom, func.ST_GeomFromText(pos_wkt, 4326))).all()
+
+        # Use indices to speed things up...
+        engine_url = self.dao.session.connection().engine.url
+        if 'sqlite' in engine_url.drivername:
+            table = clazz.__name__.lower()
+            search_frame = literal_column('BuildCircleMbr(%s, %s, 1)' % (lon, lat))
+            subq = self.dao.session.query(clazz.id).filter(
+                literal_column('ROWID').in_(
+                    select(
+                        ["ROWID FROM SpatialIndex"],
+                        and_(
+                            (literal_column('f_table_name') == table),
+                            (literal_column('search_frame') == search_frame),
+                        )
+                    )
+                )
+            ).subquery('idx_subq')
+
+            q = self.dao.session.query(clazz).join(subq, clazz.id == subq.c.id)
+            q = q.filter(func.ST_Contains(
+                clazz.geom, func.ST_GeomFromText(pos_wkt, 4326)))
+            objs = q.all()
         if objs:
             return objs[0]
         return None
@@ -461,6 +482,7 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=logger,
             commit_interval=1e3,
+            #limit=1e2,
         ) 
         ingestor.ingest()
         self.dao.commit()
@@ -506,7 +528,7 @@ class SASIGridderTask(task_manager.Task):
             return self.trip_type_gear_mappings.get(trip_type)
 
         def float_w_empty_dot(value):
-            if value == '.':
+            if value == '.' or value == '':
                 return None
             elif value is not None:
                 return float(value)
@@ -531,7 +553,7 @@ class SASIGridderTask(task_manager.Task):
             logger=logger,
             get_count=True,
             commit_interval=1e4,
-            limit=1e3
+            #limit=1e3
         ) 
         ingestor.ingest()
 

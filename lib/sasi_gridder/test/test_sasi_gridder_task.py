@@ -163,6 +163,18 @@ class SASIGridderTestCase(unittest.TestCase):
             output_path=output_path
         )
         task.call()
+        output_file = open(output_path, "rb")
+        reader = csv.DictReader(output_file)
+        results = [r for r in reader]
+        output_file.close()
+        self.assertEquals(
+            results, 
+            [
+                {'a': '8.0', 'cell_id': '1', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0'},
+                {'a': '4.0', 'cell_id': '2', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0'}
+            ]
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

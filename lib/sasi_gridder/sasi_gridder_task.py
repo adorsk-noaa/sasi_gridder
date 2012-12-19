@@ -17,6 +17,7 @@ import os
 import shutil
 import zipfile
 import logging
+import csv
 
 
 def robust_cast(fn):
@@ -45,6 +46,7 @@ class SASIGridderTask(task_manager.Task):
         self.data = data
         self.config = config
         self.value_attrs = models.Effort.value_attrs
+        self.key_attrs = ['gear_id']
 
         # Define trip type to gear code mappings.
         # @TODO: put this in config.
@@ -199,7 +201,6 @@ class SASIGridderTask(task_manager.Task):
 
             # Commit any remaining changes.
             self.dao.commit()
-            self.print_cells()
 
             # 
             # 2. For each effort assigned to a stat area,
@@ -268,7 +269,6 @@ class SASIGridderTask(task_manager.Task):
 
             # Commit changes.
             self.dao.commit()
-            self.print_cells()
 
 
             #
@@ -322,10 +322,9 @@ class SASIGridderTask(task_manager.Task):
             # Commit changes.
             self.dao.commit()
 
-            self.print_cells()
             # Done! At this point the effort has been distributed. 
 
-            # Note that there may be some efforts which do not included.
+            # Note that there may be some efforts which are not included.
             # For example, if an unassigned effort has an effort_key which is 
             # not used by any effort assigned to a cell or a stat_area, then 
             # no cell will have a non-zero pct_value for that effort_key.
@@ -338,7 +337,23 @@ class SASIGridderTask(task_manager.Task):
         #
         # Output gridded efforts.
         #
+        csv_file = open(self.output_path, "w")
+        w = csv.writer(csv_file)
+        fields = ['cell_id'] + self.key_attrs + self.value_attrs
+        w.writerow(fields)
 
+        cells = self.dao.session.query(
+            self.dao.schema['sources']['Cell'])
+        for cell in cells:
+            for keys, values in cell.keyed_values.items():
+                row_dict = {
+                    'cell_id': cell.id
+                }
+                for i in range(len(self.key_attrs)):
+                    row_dict[self.key_attrs[i]] = keys[i]
+                row_dict.update(values)
+                w.writerow([row_dict[f] for f in fields])
+        csv_file.close()
 
         shutil.rmtree(build_dir)
 
@@ -412,7 +427,7 @@ class SASIGridderTask(task_manager.Task):
 
     def get_effort_key(self, effort):
         """  Key for grouping values by effort types. """
-        return (effort.gear_id,)
+        return tuple([getattr(effort, attr, None) for attr in self.key_attrs])
 
     def ingest_cells(self, parent_logger=None):
         logger = self.get_logger_logger(

@@ -1,8 +1,7 @@
 from sa_dao.geo_orm_dao import GeoORM_DAO
 from sasi_gridder import models as models
 from sqlalchemy import (Table, Column, ForeignKey, ForeignKeyConstraint, 
-                        Integer, String, Text, Float, PickleType, 
-                        create_engine, MetaData)
+                        Integer, String, Text, Float, create_engine, MetaData)
 from sqlalchemy.orm import (mapper, relationship)
 from geoalchemy import (GeometryExtensionColumn, MultiPolygon, 
                         GeometryColumn, GeometryDDL)
@@ -58,7 +57,6 @@ class SASIGridderDAO(GeoORM_DAO):
                            Column('area', Float),
                            # Note: if upgrade to SA 8,
                            # mutable types have changed...watch out.
-                           Column('keyed_values', PickleType(mutable=True)),
                            GeometryExtensionColumn('geom', MultiPolygon(2)),
                           ),
             'is_spatial': True,
@@ -73,7 +71,6 @@ class SASIGridderDAO(GeoORM_DAO):
         mappings['StatArea'] = {
             'table': Table('statarea', self.metadata,
                            Column('id', Integer, primary_key=True),
-                           Column('keyed_values', PickleType(mutable=True)),
                            GeometryExtensionColumn('geom', MultiPolygon(2)),
                           ),
             'is_spatial': True,

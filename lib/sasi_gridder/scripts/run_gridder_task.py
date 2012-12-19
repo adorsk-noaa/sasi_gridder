@@ -17,7 +17,7 @@ argparser.add_argument('--db-uri', default='sqlite://')
 
 args = argparser.parse_args()
 
-logger = logging.getLogger()
+logger = logging.getLogger('run_gridder_task')
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 

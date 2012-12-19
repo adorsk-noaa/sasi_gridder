@@ -19,7 +19,11 @@ import shutil
 import zipfile
 import logging
 import csv
+import time
+import inspect
 
+def ln():
+    return inspect.currentframe().f_back.f_lineno
 
 def robust_cast(fn):
     def robust_fn(val):
@@ -93,261 +97,312 @@ class SASIGridderTask(task_manager.Task):
         # Create build dir.
         build_dir = tempfile.mkdtemp(prefix="gridderWork.")
 
-        con = self.get_connection()
-        trans = con.begin()
-        session = sessionmaker()(bind=con)
-
-        # @TODO: add validation here?
+        self.con = self.get_connection()
+        self.trans = self.con.begin()
+        session = sessionmaker()(bind=self.con)
 
         # Read in data.
-        try:
-            base_msg = "Ingesting..."
-            ingest_logger = self.get_logger_logger('ingest', base_msg,
-                                                   self.logger)
-            self.message_logger.info(base_msg)
-            self.dao = SASIGridderDAO(session=session)
+        base_msg = "Ingesting..."
+        ingest_logger = self.get_logger_logger('ingest', base_msg,
+                                               self.logger)
+        self.message_logger.info(base_msg)
+        self.dao = SASIGridderDAO(session=session)
 
-            # Read in cells.
-            self.ingest_cells(parent_logger=ingest_logger)
+        # Read in cells.
+        self.ingest_cells(parent_logger=ingest_logger)
 
-            # Read in stat_areas.
-            self.ingest_stat_areas(parent_logger=ingest_logger)
+        # Create dict to hold cell values.
+        self.c_values = {}
+        for cell in self.dao.query('__Cell'):
+            self.c_values[cell.id] = {}
 
-            # Read in raw_efforts.
-            self.ingest_raw_efforts(parent_logger=ingest_logger)
+        # Read in stat_areas.
+        self.ingest_stat_areas(parent_logger=ingest_logger)
 
-        except Exception as e:
-            self.logger.exception("Error ingesting")
-            raise e
+        # Create dict to hold stat area values.
+        self.sa_values = {}
+        for stat_area in self.dao.query('__StatArea'):
+            self.sa_values[stat_area.id] = {}
 
-        # Grid the efforts
-        try:
-            base_msg = "Starting gridding."
-            gridding_logger = self.get_logger_logger('gridding', base_msg,
-                                                      self.logger)
-            self.message_logger.info(base_msg)
+        #
+        #  Main part of the gridding task.
+        #   
 
-            #
-            #  Main part of the gridding task.
-            #   
+        base_msg = "Starting gridding."
+        gridding_logger = self.get_logger_logger('gridding', base_msg,
+                                                  self.logger)
+        self.message_logger.info(base_msg)
 
-            #
-            # 0. Terms used here:
-            # 'clean' efforts can be assigned to a cell.
-            # 'kinda_dirty' efforts can be assigned to a stat_area.
-            # 'super_dirty' efforts can not be assigned to a cell or a stat_area.
-            #
-            # Running example:
-            # We start with two cells, 'C1' and 'C2', and one stat_area , 'StatArea1'.
-            # 'StatArea1' contains 50% of 'C1', and 100% of 'C2'.
-            #
+        #
+        # 0. Terms used here:
+        # 'clean' efforts can be assigned to a cell.
+        # 'kinda_dirty' efforts can be assigned to a stat_area.
+        # 'super_dirty' efforts can not be assigned to a cell or a stat_area.
+        #
+        # Running example:
+        # We start with two cells, 'C1' and 'C2', and one stat_area , 'StatArea1'.
+        # 'StatArea1' contains 50% of 'C1', and 100% of 'C2'.
+        #
 
-            #
-            # 1. Assign 'clean' efforts to cells, assign kinda-dirty efforts to
-            # stat areas, and save super-dirty efforts to the super-dirty efforts list.
-            #
-            # Running example:
-            # We have 100 points of clean effort which can be assigned to 'C1',
-            # 100 points of clean effort which can be assigned to 'C2',
-            # 100 points of kinda-dirty effort which can be assigned to 'StatArea1',
-            # and 100 points of super-dirty effort which can't be assigned to anything.
-            # After this first step, both 'C1' and 'C2' will have 100 points of effort assigned
-            # from clean efforts.
-            #
+        #
+        # 1. Assign 'clean' efforts to cells, assign kinda-dirty efforts to
+        # stat areas, and save super-dirty efforts to the super-dirty efforts list.
+        #
+        # Running example:
+        # We have 100 points of clean effort which can be assigned to 'C1',
+        # 100 points of clean effort which can be assigned to 'C2',
+        # 100 points of kinda-dirty effort which can be assigned to 'StatArea1',
+        # and 100 points of super-dirty effort which can't be assigned to anything.
+        # After this first step, both 'C1' and 'C2' will have 100 points of effort assigned
+        # from clean efforts.
+        #
 
-            base_msg = "First pass... "
-            cells_logger = self.get_logger_logger('cells', base_msg,
-                                                  gridding_logger)
-            cells_logger.info(base_msg)
 
-            unassigned = {}
+        # Do the first pass on efforts
+        # as we read them in.
+        
 
-            effort_counter = 0
-            commit_interval = 1e5
-            logging_interval = 1e4
-            efforts_q = self.dao.session.query(
-                self.dao.schema['sources']['Effort'])
-            batched_efforts = self.dao.get_batched_results(
-                efforts_q, commit_interval)
-            num_efforts = efforts_q.count()
+        base_msg = "Assigning raw efforts to cells/stat_areas ... "
+        fp_logger = self.get_logger_logger('first_pass', base_msg,
+                                              gridding_logger)
+        fp_logger.info(base_msg)
 
-            for effort in batched_efforts:
-                effort_counter += 1
+        unassigned = {}
 
-                if (effort_counter % logging_interval) == 0:
-                    cells_logger.info("effort %s of %s (%.1f%%)" % (
-                        effort_counter, num_efforts, 
-                        100.0 * effort_counter/num_efforts))
+        logging_interval = 1e4
 
-                # If effort has lat and lon...
-                if effort.lat is not None and effort.lon is not None:
-                    # Can effort can be assigned to cell?
-                    cell = self.get_cell_for_pos(effort.lat, effort.lon)
-                    if cell:
-                        self.add_effort_to_cell(cell, effort, commit=False)
-                        continue
+        # Define functions to handle raw effort columns
+        def trip_type_to_gear_id(trip_type):
+            return self.trip_type_gear_mappings.get(trip_type)
 
-                    # Otherwise can effort can be assigned to statarea?
-                    stat_area = self.get_stat_area_for_pos(
-                        effort.lat, effort.lon)
-                    if stat_area:
-                        self.add_effort_to_stat_area(stat_area, effort,
-                                                     commit=False)
-                        continue
+        def float_w_empty_dot(value):
+            if value == '.' or value == '':
+                return None
+            elif value is not None:
+                return float(value)
 
-                    # Otherwise add to unassigned.
-                    else:
-                        self.add_effort_to_unassigned(unassigned, effort)
-                        continue
+        # Define function to execute after each raw effort is mapped to an
+        # effort column. This is the first pass described above.
+        def first_pass(effort, effort_counter): 
+            # If effort has lat and lon...
+            if effort.lat is not None and effort.lon is not None:
+                # Can effort can be assigned to cell?
+                cell = self.get_cell_for_pos(effort.lat, effort.lon)
+                if cell:
+                    self.add_effort_to_cell(cell, effort)
+                    return
 
-                # Otherwise if effort has a stat area...
-                elif effort.stat_area_id is not None:
-                    stat_area = self.dao.session.query(
-                        self.dao.schema['sources']['StatArea']).get(
-                            effort.stat_area_id)
-                    self.add_effort_to_stat_area(stat_area, effort, commit=False)
+                # Otherwise can effort can be assigned to statarea?
+                stat_area = self.get_stat_area_for_pos(
+                    effort.lat, effort.lon)
+                if stat_area:
+                    self.add_effort_to_stat_area(stat_area, effort)
+                    return
 
-                # Otherwise add to unassigned list.
+                # Otherwise add to unassigned.
                 else:
                     self.add_effort_to_unassigned(unassigned, effort)
+                    return
 
-                if (effort_counter % commit_interval) == 0:
-                    self.dao.commit()
+            # Otherwise if effort has a stat area...
+            elif effort.stat_area_id is not None:
+                stat_area = self.dao.session.query(
+                    self.dao.schema['sources']['StatArea']).get(
+                        effort.stat_area_id)
+                if not stat_area:
+                    self.add_effort_to_unassigned(unassigned, effort)
+                    return
+                else:
+                    self.add_effort_to_stat_area(stat_area, effort)
 
-            # Commit any remaining changes.
-            self.dao.commit()
+            # Otherwise add to unassigned list.
+            else:
+                self.add_effort_to_unassigned(unassigned, effort)
 
-            # 
-            # 2. For each effort assigned to a stat area,
-            # distribute values across cracked cells in that stat area.
-            # We distribute values in proportion to the amount of value
-            # contained in the cracked cell relative to the total amount
-            # of 'clean' value the stat area already contains.
-            #
-            # Running Example:
-            # We now distribute the 100 points of kinda effort which can be assigned to 'StatArea1'.
-            # We distribute the effort proportionally to the cracked cells,
-            # so that 'C1' gets 33 additional effort points, and 'C2' gets 66 additional effort points.
-            #
 
-            stat_areas = self.dao.session.query(
-                self.dao.schema['sources']['StatArea'])
-            for stat_area in stat_areas:
-                # Calculate totals for efforts assigned to the stat area.
-                stat_area_totals = {}
-                for effort_key, effort_values in stat_area.keyed_values.items():
-                    stat_area_values = stat_area_totals.setdefault(
+        # Define ingestor class to read raw efforts.
+        # The ingestor will execute the 'first_pass' function
+        # for each mapped record object.
+        class EffortIngestor(ingestors.CSV_Ingestor):
+            def __init__(self, *args, **kwargs):
+                super(EffortIngestor, self).__init__(*args, **kwargs)
+
+            def set_target_attr(self, target, attr, value):
+                setattr(target, attr, value)
+
+            def after_record_mapped(self, source_record, target_record, 
+                                    counter): 
+                first_pass(target_record, counter)
+            def initialize_target_record(self, counter):
+                return models.Effort()
+
+        # Create ingestor instance.
+        ingestor = EffortIngestor(
+            csv_file=self.raw_efforts_path,
+            mappings=[
+                {'source': 'trip_type', 'target': 'gear_id', 
+                 'processor': trip_type_to_gear_id},
+                {'source': 'year', 'target': 'time',
+                 'processor': float_w_empty_dot},
+                {'source': 'nemarea', 'target': 'stat_area_id',
+                 'processor': float_w_empty_dot},
+                {'source': 'A', 'target': 'a',
+                 'processor': float_w_empty_dot},
+                {'source': 'value', 'target': 'value',
+                 'processor': float_w_empty_dot},
+                {'source': 'hours_fished', 'target': 'hours_fished',
+                 'processor': float_w_empty_dot},
+                {'source': 'lat', 'target': 'lat', 
+                 'processor': float_w_empty_dot},
+                {'source': 'lon', 'target': 'lon',
+                 'processor': float_w_empty_dot}
+            ],
+            logger=fp_logger,
+            get_count=True,
+            #limit=1e3
+        ) 
+
+        # Run the ingestor, and thus do the first pass.
+        ingestor.ingest()
+
+        # 
+        # 2. For each effort assigned to a stat area,
+        # distribute values across cracked cells in that stat area.
+        # We distribute values in proportion to the amount of value
+        # contained in the cracked cell relative to the total amount
+        # of 'clean' value the stat area already contains.
+        #
+        # Running Example:
+        # We now distribute the 100 points of kinda effort which can be assigned to 'StatArea1'.
+        # We distribute the effort proportionally to the cracked cells,
+        # so that 'C1' gets 33 additional effort points, and 'C2' gets 66 additional effort points.
+        #
+
+        base_msg = "Distributing stat_area values to cells ... "
+        sa_logger = self.get_logger_logger('stat_areas', base_msg,
+                                              gridding_logger)
+        sa_logger.info(base_msg)
+
+        stat_areas = self.dao.session.query(
+            self.dao.schema['sources']['StatArea'])
+        num_stat_areas = stat_areas.count()
+        logging_interval = 1
+        sa_counter = 0
+        for stat_area in stat_areas:
+            sa_counter += 1
+            if (sa_counter % logging_interval) == 0:
+                sa_logger.info("stat_area %s of %s (%.1f%%)" % (
+                    sa_counter, num_stat_areas, 
+                    100.0 * sa_counter/num_stat_areas))
+
+            # Get stat area values.
+            sa_keyed_values = self.sa_values[stat_area.id]
+
+            # Get list of cracked cells.
+            cracked_cells = self.get_cracked_cells_for_stat_area(stat_area)
+
+            # Calculate totals for values across cracked cells.
+            ccell_totals = {}
+            for ccell in cracked_cells:
+                for effort_key, ccell_values in ccell.keyed_values.items():
+                    ccell_totals_values = ccell_totals.setdefault(
                         effort_key,
                         self.new_values_dict()
                     )
-                    for attr, effort_value in effort_values.items():
-                        stat_area_values[attr] += effort_value
+                    for attr, ccell_value in ccell_values.items():
+                        ccell_totals_values[attr] += ccell_value
 
-                # Get list of cracked cells.
-                cracked_cells = self.get_cracked_cells_for_stat_area(stat_area)
-
-                # Calculate totals for values across cracked cells.
-                ccell_totals = {}
-                for ccell in cracked_cells:
-                    for effort_key, ccell_values in ccell.keyed_values.items():
-                        ccell_totals_values = ccell_totals.setdefault(
-                            effort_key,
-                            self.new_values_dict()
-                        )
-                        for attr, ccell_value in ccell_values.items():
-                            ccell_totals_values[attr] += ccell_value
-
-                # Distribute the stat area's values across the cracked
-                # cells, in proportion to the cracked cell's values as a
-                # percentage of the stat area's cracked cell totals.
-                for ccell in cracked_cells:
-                    pcell = ccell.parent_cell
-                    for effort_key, sat_values in stat_area_totals.items():
-                        ccell_totals_values = ccell_totals.get(effort_key)
-                        ccell_values = ccell.keyed_values.get(effort_key)
-                        if not ccell_totals_values or not ccell_values:
-                            continue
-                        for attr, sa_value in sat_values.items():
-                            # Don't add anything for empty values.
-                            # This also avoids division by zero errors.
-                            if not sa_value:
-                                continue
-                            ccell_value = ccell_values.get(attr, 0.0)
-                            ccell_totals_value = ccell_totals_values.get(attr,
-                                                                         0.0)
-                            pct_value = ccell_value/ccell_totals_value
-                            # Add proportional value to cracked cell's parent 
-                            # cell.
-                            pcell_values = pcell.keyed_values[effort_key]
-                            pcell_values[attr] += sa_value * pct_value
-                    self.dao.save(pcell, commit=False)
-
-            # Commit changes.
-            self.dao.commit()
-
-
-            #
-            # 3. For efforts which could not be assigned to a cell or a stat area
-            # ('super-dirty' efforts), distribute the efforts across all cells,
-            # such that the amount of effort each cell is receives is proportional to the cell's
-            # total contribution to the overall total.
-            #
-            # Running Example:
-            # We start cells 'C1' and 'C2'.
-            # 'C1' starts with 133 effort points from clean efforts + kinda-dirty efforts.
-            # Likewise 'C1' starts with 166 effort points from clean efforts + kinda-dirty efforts.
-            # Our overall total is 133 + 166 = 300.
-            # 'C1' is responsible for 133/300 = 45% of the total effort.
-            # 'C2' is responsible for 166/300 = 55% of the total effort.
-            # We then have 100 additional points of super-dirty effort which could not be assigned to any cell
-            # or stat area.
-            # We distributed the effort proportionally to the cells so that
-            # 'C1' gets 45 additional effort points, and 'C2' gets 55 additional effort points.
-            # Our final result is that 'C1' has 133 + 45 = 178 effort points, and
-            # 'C2' has 166 + 55 = 221 effort points.
-
-            # Calculate totals across all cells.
-            totals = {}
-            cells = self.dao.session.query(
-                self.dao.schema['sources']['Cell'])
-            for cell in cells:
-                for effort_key, cell_values in cell.keyed_values.items():
-                    totals_values = totals.setdefault(
-                        effort_key, 
-                        self.new_values_dict()
-                    )
-                    for attr, cell_value in cell_values.items():
-                        totals_values[attr] += cell_value
-
-            # Distribute unassigned efforts across all cells,
-            # in proportion to the cell's values as a percentage of the total.
-            for effort_key, unassigned_values in unassigned.items():
-                for cell in cells:
-                    cell_values = cell.keyed_values.get(effort_key)
-                    if not cell_values:
+            # Distribute the stat area's values across the cracked
+            # cells, in proportion to the cracked cell's values as a
+            # percentage of the stat area's cracked cell totals.
+            for ccell in cracked_cells:
+                pcell_keyed_values = self.c_values[ccell.parent_cell.id]
+                for effort_key, sa_values in sa_keyed_values.items():
+                    ccell_totals_values = ccell_totals.get(effort_key)
+                    ccell_values = ccell.keyed_values.get(effort_key)
+                    pcell_values = pcell_keyed_values.setdefault(
+                        effort_key, self.new_values_dict())
+                    if not ccell_totals_values or not ccell_values:
                         continue
-                    for attr, unassigned_value in unassigned_values.items():
-                        if not unassigned_value:
+                    for attr, sa_value in sa_values.items():
+                        # Don't add anything for empty values.
+                        # This also avoids division by zero errors.
+                        if not sa_value:
                             continue
-                        cell_value = cell_values.get(attr, 0.0)
-                        pct_value = cell_value/unassigned_value
-                        cell_values[attr] += unassigned_value * pct_value
-                    self.dao.save(cell, commit=False)
+                        ccell_value = ccell_values.get(attr, 0.0)
+                        ccell_totals_value = ccell_totals_values.get(attr,
+                                                                     0.0)
+                        pct_value = ccell_value/ccell_totals_value
+                        # Add proportional value to cracked cell's parent 
+                        # cell.
+                        pcell_values[attr] += sa_value * pct_value
 
-            # Commit changes.
-            self.dao.commit()
+        #
+        # 3. For efforts which could not be assigned to a cell or a stat area
+        # ('super-dirty' efforts), distribute the efforts across all cells,
+        # such that the amount of effort each cell is receives is proportional to the cell's
+        # total contribution to the overall total.
+        #
+        # Running Example:
+        # We start cells 'C1' and 'C2'.
+        # 'C1' starts with 133 effort points from clean efforts + kinda-dirty efforts.
+        # Likewise 'C1' starts with 166 effort points from clean efforts + kinda-dirty efforts.
+        # Our overall total is 133 + 166 = 300.
+        # 'C1' is responsible for 133/300 = 45% of the total effort.
+        # 'C2' is responsible for 166/300 = 55% of the total effort.
+        # We then have 100 additional points of super-dirty effort which could not be assigned to any cell
+        # or stat area.
+        # We distributed the effort proportionally to the cells so that
+        # 'C1' gets 45 additional effort points, and 'C2' gets 55 additional effort points.
+        # Our final result is that 'C1' has 133 + 45 = 178 effort points, and
+        # 'C2' has 166 + 55 = 221 effort points.
+        base_msg = "Distributing unassigned values to cells ... "
+        unassigned_logger = self.get_logger_logger('unassigned', base_msg,
+                                              gridding_logger)
+        unassigned_logger.info(base_msg)
 
-            # Done! At this point the effort has been distributed. 
+        # Calculate totals across all cells.
+        totals = {}
+        cells = self.dao.session.query(
+            self.dao.schema['sources']['Cell'])
+        num_cells = cells.count()
+        for cell in cells:
+            cell_keyed_values = self.c_values[cell.id]
+            for effort_key, cell_values in cell_keyed_values.items():
+                totals_values = totals.setdefault(
+                    effort_key, 
+                    self.new_values_dict()
+                )
+                for attr, cell_value in cell_values.items():
+                    totals_values[attr] += cell_value
 
-            # Note that there may be some efforts which are not included.
-            # For example, if an unassigned effort has an effort_key which is 
-            # not used by any effort assigned to a cell or a stat_area, then 
-            # no cell will have a non-zero pct_value for that effort_key.
+        # Distribute unassigned efforts across all cells,
+        # in proportion to the cell's values as a percentage of the total.
+        logging_interval = 1e3
+        cell_counter = 0
+        for cell in cells:
+            cell_counter += 1
+            if (cell_counter % logging_interval) == 0:
+                unassigned_logger.info("cell %s of %s (%.1f%%)" % (
+                    cell_counter, num_cells, 100.0 * cell_counter/num_cells))
 
-        except Exception as e:
-            self.logger.exception("Error gridding : %s" % e)
-            raise e
+            for effort_key, unassigned_values in unassigned.items():
+                cell_values = self.c_values[cell.id].get(effort_key)
+                if not cell_values:
+                    continue
+                for attr, unassigned_value in unassigned_values.items():
+                    if not unassigned_value:
+                        continue
+                    cell_value = cell_values.get(attr, 0.0)
+                    pct_value = cell_value/unassigned_value
+                    cell_values[attr] += unassigned_value * pct_value
 
+        # Done with gridding. At this point the effort has been distributed. 
+
+        # Note that there may be some efforts which are not included.
+        # For example, if an unassigned effort has an effort_key which is 
+        # not used by any effort assigned to a cell or a stat_area, then 
+        # no cell will have a non-zero pct_value for that effort_key.
 
         #
         # Output gridded efforts.
@@ -360,7 +415,8 @@ class SASIGridderTask(task_manager.Task):
         cells = self.dao.session.query(
             self.dao.schema['sources']['Cell'])
         for cell in cells:
-            for keys, values in cell.keyed_values.items():
+            cell_keyed_values = self.c_values[cell.id]
+            for keys, values in cell_keyed_values.items():
                 row_dict = {
                     'cell_id': cell.id
                 }
@@ -402,6 +458,7 @@ class SASIGridderTask(task_manager.Task):
     def get_obj_for_pos(self, clazz, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
 
+        s = time.time()
         # Use indices to speed things up...
         engine_url = self.dao.session.connection().engine.url
         if 'sqlite' in engine_url.drivername:
@@ -438,11 +495,6 @@ class SASIGridderTask(task_manager.Task):
                 effort_value = 0.0
             values_dict[k] += effort_value
 
-    def add_effort_to_obj(self, obj, effort, keyed_values_attr='keyed_values',
-                          commit=True):
-        keyed_values_dict = getattr(obj, keyed_values_attr)
-        self.add_effort_to_keyed_values_dict(keyed_values_dict, effort)
-
     def add_effort_to_keyed_values_dict(self, kvd, effort):
         values = kvd.setdefault(
             self.get_effort_key(effort), 
@@ -450,13 +502,13 @@ class SASIGridderTask(task_manager.Task):
         )
         self.update_values_dict(values, effort)
 
-    def add_effort_to_cell(self, cell, effort, commit=True):
-        self.add_effort_to_obj(cell, effort)
-        self.dao.save(cell, commit=commit)
+    def add_effort_to_cell(self, cell, effort):
+        cell_keyed_values = self.c_values[cell.id]
+        self.add_effort_to_keyed_values_dict(cell_keyed_values, effort)
 
-    def add_effort_to_stat_area(self, stat_area, effort, commit=True):
-        self.add_effort_to_obj(stat_area, effort)
-        self.dao.save(stat_area, commit=commit)
+    def add_effort_to_stat_area(self, stat_area, effort):
+        sa_keyed_values = self.sa_values[stat_area.id]
+        self.add_effort_to_keyed_values_dict(sa_keyed_values, effort)
 
     def add_effort_to_unassigned(self, unassigned, effort):
         self.add_effort_to_keyed_values_dict(unassigned, effort)
@@ -481,11 +533,11 @@ class SASIGridderTask(task_manager.Task):
                 {'source': 'TYPE_ID', 'target': 'type_id'},
             ],
             logger=logger,
-            commit_interval=1e3,
+            commit_interval=None,
             #limit=1e2,
         ) 
         ingestor.ingest()
-        self.dao.commit()
+        self.commit()
 
         # Calculate cell areas.
         for cell in self.dao.session.query(
@@ -494,7 +546,7 @@ class SASIGridderTask(task_manager.Task):
                 gis_util.wkb_to_shape(str(cell.geom.geom_wkb)),
             )
             self.dao.save(cell, commit=False)
-        self.dao.commit()
+        self.commit()
 
     def ingest_stat_areas(self, parent_logger=None):
         logger = self.get_logger_logger(
@@ -511,56 +563,10 @@ class SASIGridderTask(task_manager.Task):
                 {'source': 'SAREA', 'target': 'id'},
             ],
             logger=logger,
-            commit_interval=1e3,
+            commit_interval=None,
         ) 
         ingestor.ingest()
-        self.dao.commit()
-
-    def ingest_raw_efforts(self, parent_logger=None):
-        logger = self.get_logger_logger(
-            name='raw_effort_ingest', 
-            base_msg='Ingesting raw efforts...',
-            parent_logger=parent_logger
-        )
-
-        # Define mappings form trip types to gear codes.
-        def trip_type_to_gear_id(trip_type):
-            return self.trip_type_gear_mappings.get(trip_type)
-
-        def float_w_empty_dot(value):
-            if value == '.' or value == '':
-                return None
-            elif value is not None:
-                return float(value)
-
-        ingestor = ingestors.DAO_CSV_Ingestor(
-            dao=self.dao, 
-            csv_file=self.raw_efforts_path,
-            clazz=self.dao.schema['sources']['Effort'],
-            mappings=[
-                {'source': 'trip_type', 'target': 'gear_id', 
-                 'processor': trip_type_to_gear_id},
-                {'source': 'year', 'target': 'time',
-                 'processor': float_w_empty_dot},
-                {'source': 'nemarea', 'target': 'stat_area_id',
-                 'processor': float_w_empty_dot},
-                {'source': 'A', 'target': 'a',
-                 'processor': float_w_empty_dot},
-                {'source': 'value', 'target': 'value',
-                 'processor': float_w_empty_dot},
-                {'source': 'hours_fished', 'target': 'hours_fished',
-                 'processor': float_w_empty_dot},
-                {'source': 'lat', 'target': 'lat', 
-                 'processor': float_w_empty_dot},
-                {'source': 'lon', 'target': 'lon',
-                 'processor': float_w_empty_dot}
-            ],
-            logger=logger,
-            get_count=True,
-            commit_interval=1e5,
-            #limit=1e3
-        ) 
-        ingestor.ingest()
+        self.commit()
 
     def get_cracked_cells_for_stat_area(self, stat_area):
         cracked_cells = []
@@ -580,7 +586,8 @@ class SASIGridderTask(task_manager.Task):
             # Set cracked cell values in proportion to percentage
             # of parent cell's area.
             ccell_keyed_values = {}
-            for effort_key, icell_values in icell.keyed_values.items():
+            icell_keyed_values = self.c_values[icell.id]
+            for effort_key, icell_values in icell_keyed_values.items():
                 ccell_values = ccell_keyed_values.setdefault(effort_key, {})
                 for attr, value in icell_values.items():
                     ccell_values[attr] = pct_area * value
@@ -597,4 +604,9 @@ class SASIGridderTask(task_manager.Task):
         cells = self.dao.session.query(
             self.dao.schema['sources']['Cell'])
         for cell in cells:
-            print cell.__dict__
+            print id(cell), cell.__dict__
+
+    def commit(self):
+        self.dao.commit()
+        self.trans.commit()
+        self.trans = self.con.begin()

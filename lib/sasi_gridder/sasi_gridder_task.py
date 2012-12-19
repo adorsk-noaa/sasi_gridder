@@ -19,17 +19,52 @@ import shutil
 import zipfile
 import logging
 import csv
-import time
-import inspect
+from math import floor
 
-def ln():
-    return inspect.currentframe().f_back.f_lineno
 
-def robust_cast(fn):
-    def robust_fn(val):
-        if val is None: return None
-        else: return fn(val)
-    return robust_fn
+class SpatialHash(object):
+    def __init__(self, cell_size=.05):
+        self.cell_size = float(cell_size)
+        self.d = {}
+
+    def _add(self, cell_coord, o):
+        """Add the object o to the cell at cell_coord."""
+        try:
+            self.d.setdefault(cell_coord, set()).add(o)
+        except KeyError:
+            self.d[cell_coord] = set((o,))
+
+    def _cell_for_point(self, p):
+        cx = floor(p[0]/self.cell_size)
+        cy = floor(p[1]/self.cell_size)
+        return (int(cx), int(cy))
+
+    def _cells_for_rect(self, r):
+        cells = set()
+        cy = floor(r[1] / self.cell_size)
+        while (cy * self.cell_size) <= r[3]:
+            cx = floor(r[0] / self.cell_size)
+            while (cx * self.cell_size) <= r[2]:
+                cells.add((int(cx), int(cy)))
+                cx += 1.0
+            cy += 1.0
+        return cells
+
+    def add_rect(self, r, obj):
+        cells = self._cells_for_rect(r)
+        for c in cells:
+            self._add(c, obj)
+
+    def items_for_point(self, p):
+        cell = self._cell_for_point(p)
+        return self.d.get(cell, set())
+
+    def items_for_rect(self, r):
+        cells = self._cells_for_rect(r)
+        items = set()
+        for c in cells:
+            items.update(self.d.get(c, set()))
+        return items
 
 class LoggerLogHandler(logging.Handler):
     """ Custom log handler that logs messages to another
@@ -101,6 +136,10 @@ class SASIGridderTask(task_manager.Task):
         self.trans = self.con.begin()
         session = sessionmaker()(bind=self.con)
 
+        # Create spatial hash for cells.
+        # Cell size of about .1 (degrees) seems to work well.
+        self.cell_spatial_hash = SpatialHash(cell_size=.1)
+
         # Read in data.
         base_msg = "Ingesting..."
         ingest_logger = self.get_logger_logger('ingest', base_msg,
@@ -108,8 +147,8 @@ class SASIGridderTask(task_manager.Task):
         self.message_logger.info(base_msg)
         self.dao = SASIGridderDAO(session=session)
 
-        # Read in cells.
-        self.ingest_cells(parent_logger=ingest_logger)
+        # Read in cells and add to spatial hash.
+        self.ingest_cells(parent_logger=ingest_logger, limit=None)
 
         # Create dict to hold cell values.
         self.c_values = {}
@@ -443,11 +482,27 @@ class SASIGridderTask(task_manager.Task):
         logger.setLevel(self.message_logger.level)
         return logger
 
-    def get_cell_for_pos(self, lat, lon):
+    def get_cell_for_pos_db(self, lat, lon):
         """ Get cell which contains a given lat lon.
-        Returns None if no cell could be found."""
+        Returns None if no cell could be found.
+        Via the db."""
         Cell = self.dao.schema['sources']['Cell']
         return self.get_obj_for_pos(Cell, lat, lon)
+
+    def get_cell_for_pos_spatial_hash(self, lat, lon):
+        """
+        Get cell which contains given point, via
+        spatial hash.
+        """
+        pos_wkt = 'POINT(%s %s)' % (lon, lat)
+        candidates = self.cell_spatial_hash.items_for_point((lon,lat))
+        for c in candidates:
+            c_shp = gis_util.wkb_to_shape(str(c.geom.geom_wkb))
+            pnt_shp = gis_util.wkt_to_shape(pos_wkt)
+            if gis_util.get_intersection(c_shp, pnt_shp):
+                return c
+        return None
+    get_cell_for_pos = get_cell_for_pos_spatial_hash
 
     def get_stat_area_for_pos(self, lat, lon):
         """ Get statarea which contains a given lat lon.
@@ -458,7 +513,6 @@ class SASIGridderTask(task_manager.Task):
     def get_obj_for_pos(self, clazz, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
 
-        s = time.time()
         # Use indices to speed things up...
         engine_url = self.dao.session.connection().engine.url
         if 'sqlite' in engine_url.drivername:
@@ -517,7 +571,7 @@ class SASIGridderTask(task_manager.Task):
         """  Key for grouping values by effort types. """
         return tuple([getattr(effort, attr, None) for attr in self.key_attrs])
 
-    def ingest_cells(self, parent_logger=None):
+    def ingest_cells(self, parent_logger=None, limit=None):
         logger = self.get_logger_logger(
             name='cell_ingest', 
             base_msg='Ingesting cells...',
@@ -534,17 +588,18 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=logger,
             commit_interval=None,
-            #limit=1e2,
+            limit=limit
         ) 
         ingestor.ingest()
         self.commit()
 
-        # Calculate cell areas.
+        # Calculate cell areas and add cells to spatial hash.
         for cell in self.dao.session.query(
             self.dao.schema['sources']['Cell']):
-            cell.area = gis_util.get_shape_area(
-                gis_util.wkb_to_shape(str(cell.geom.geom_wkb)),
-            )
+            cell_shape = gis_util.wkb_to_shape(str(cell.geom.geom_wkb))
+            cell.area = gis_util.get_shape_area(cell_shape)
+            cell_mbr = gis_util.get_shape_mbr(cell_shape)
+            self.cell_spatial_hash.add_rect(cell_mbr, cell)
             self.dao.save(cell, commit=False)
         self.commit()
 

@@ -9,6 +9,7 @@ import tempfile
 import shutil
 import os
 import csv
+import platform
 
 
 def frange(*args):
@@ -141,13 +142,22 @@ class SASIGridderTestCase(unittest.TestCase):
 
     def test_gridder_task(self):
 
-        def get_connection():
-            import pyspatialite
-            sys.modules['pysqlite2'] = pyspatialite
-            engine = create_engine('sqlite://')
-            con = engine.connect()
-            con.execute('SELECT InitSpatialMetadata()')
-            return con
+        if platform.system() == 'Java':
+            def get_connection():
+                engine = create_engine('h2+zxjdbc:///mem:')
+                con = engine.connect()
+                javaCon = con.connection.__connection__
+                from geodb.GeoDB import InitGeoDB
+                InitGeoDB(javaCon)
+                return con
+        else:
+            def get_connection():
+                import pyspatialite
+                sys.modules['pysqlite2'] = pyspatialite
+                engine = create_engine('sqlite://')
+                con = engine.connect()
+                con.execute('SELECT InitSpatialMetadata()')
+                return con
 
         logger = logging.getLogger('test_gridder_task')
         logger.addHandler(logging.StreamHandler())

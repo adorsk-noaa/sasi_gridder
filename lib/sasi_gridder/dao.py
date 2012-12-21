@@ -1,4 +1,4 @@
-from sa_dao.geo_orm_dao import GeoORM_DAO
+from sa_dao.orm_dao import ORM_DAO
 from sasi_gridder import models as models
 from sqlalchemy import (Table, Column, ForeignKey, ForeignKeyConstraint, 
                         Integer, String, Text, Float, create_engine, MetaData)
@@ -10,9 +10,9 @@ import sys
 import logging
 
 
-class SASIGridderDAO(GeoORM_DAO):
+class SASIGridderDAO(ORM_DAO):
 
-    valid_funcs = GeoORM_DAO.valid_funcs + [
+    valid_funcs = ORM_DAO.valid_funcs + [
         'func.ST_Contains',
         'func.ST_GeomFromText',
         'func.BuildCircleMbr',
@@ -21,7 +21,7 @@ class SASIGridderDAO(GeoORM_DAO):
     def __init__(self, session=None, create_tables=True, **kwargs):
         self.session = session
         self.setUp()
-        GeoORM_DAO.__init__(self, session=self.session, schema=self.schema,
+        ORM_DAO.__init__(self, session=self.session, schema=self.schema,
                          **kwargs)
         self.valid_funcs.append('func.st_intersects')
         self.valid_funcs.append('geo_funcs.intersects')

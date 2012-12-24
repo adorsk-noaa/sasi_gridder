@@ -20,7 +20,11 @@ import zipfile
 import logging
 import csv
 from math import floor
+from time import time
+import inspect
 
+def ln_(msg=""):
+    return "%s (%s)" % (msg, inspect.currentframe().f_back.f_lineno)
 
 class SpatialHash(object):
     def __init__(self, cell_size=.05):
@@ -86,7 +90,7 @@ class SASIGridderTask(task_manager.Task):
         self.data = data
         self.config = config
         self.value_attrs = models.Effort.value_attrs
-        self.key_attrs = ['gear_id']
+        self.key_attrs = ['gear_id', 'time']
 
         # Define trip type to gear code mappings.
         # @TODO: put this in config.
@@ -136,9 +140,13 @@ class SASIGridderTask(task_manager.Task):
         self.trans = self.con.begin()
         session = sessionmaker()(bind=self.con)
 
-        # Create spatial hash for cells.
+        # Create spatial hashes for cells and stat areas.
         # Cell size of about .1 (degrees) seems to work well.
         self.cell_spatial_hash = SpatialHash(cell_size=.1)
+        self.sa_spatial_hash = SpatialHash(cell_size=.1)
+
+        # Create stat area id lookup.
+        self.sa_by_id = {}
 
         # Read in data.
         base_msg = "Ingesting..."
@@ -222,12 +230,27 @@ class SASIGridderTask(task_manager.Task):
 
         # Define function to execute after each raw effort is mapped to an
         # effort column. This is the first pass described above.
+        c_ = {
+            'll': 0,
+            'll_c': 0,
+            'll_sa': 0,
+            'll_ua': 0,
+            'sa': 0,
+            'sa_ua': 0,
+            'ua': 0
+        }
+        
         def first_pass(effort, effort_counter): 
+            #if (effort_counter % 1e3) == 0:
+            #    print ["%s: %.3e" % (k, v) for k,v in c_.items()]
+
             # If effort has lat and lon...
             if effort.lat is not None and effort.lon is not None:
+                c_['ll'] += 1
                 # Can effort can be assigned to cell?
                 cell = self.get_cell_for_pos(effort.lat, effort.lon)
                 if cell:
+                    c_['ll_c'] += 1
                     self.add_effort_to_cell(cell, effort)
                     return
 
@@ -235,28 +258,33 @@ class SASIGridderTask(task_manager.Task):
                 stat_area = self.get_stat_area_for_pos(
                     effort.lat, effort.lon)
                 if stat_area:
+                    c_['ll_sa'] += 1
                     self.add_effort_to_stat_area(stat_area, effort)
                     return
 
                 # Otherwise add to unassigned.
                 else:
+                    c_['ll_ua'] += 1
                     self.add_effort_to_unassigned(unassigned, effort)
                     return
 
             # Otherwise if effort has a stat area...
             elif effort.stat_area_id is not None:
-                stat_area = self.dao.session.query(
-                    self.dao.schema['sources']['StatArea']).get(
-                        effort.stat_area_id)
+                c_['sa'] += 1
+                stat_area = self.sa_by_id.get(effort.stat_area_id)
                 if not stat_area:
+                    c_['sa_ua'] += 1
                     self.add_effort_to_unassigned(unassigned, effort)
                     return
                 else:
                     self.add_effort_to_stat_area(stat_area, effort)
+                    return
 
             # Otherwise add to unassigned list.
             else:
+                c_['ua'] += 1
                 self.add_effort_to_unassigned(unassigned, effort)
+                return
 
 
         # Define ingestor class to read raw efforts.
@@ -369,8 +397,9 @@ class SASIGridderTask(task_manager.Task):
                         if not sa_value:
                             continue
                         ccell_value = ccell_values.get(attr, 0.0)
-                        ccell_totals_value = ccell_totals_values.get(attr,
-                                                                     0.0)
+                        ccell_totals_value = ccell_totals_values.get(attr, 0.0)
+                        if not ccell_value or not ccell_totals_value:
+                            continue
                         pct_value = ccell_value/ccell_totals_value
                         # Add proportional value to cracked cell's parent 
                         # cell.
@@ -504,17 +533,31 @@ class SASIGridderTask(task_manager.Task):
         return None
     get_cell_for_pos = get_cell_for_pos_spatial_hash
 
-    def get_stat_area_for_pos(self, lat, lon):
+    def get_stat_area_for_pos_db(self, lat, lon):
         """ Get statarea which contains a given lat lon.
         Returns None if no StatArea could be found."""
         StatArea = self.dao.schema['sources']['StatArea']
         return self.get_obj_for_pos(StatArea, lat, lon)
+
+    def get_stat_area_for_pos_spatial_hash(self, lat, lon):
+        pos_wkt = 'POINT(%s %s)' % (lon, lat)
+        candidates = self.sa_spatial_hash.items_for_point((lon,lat))
+        for c in candidates:
+            c_shp = gis_util.wkb_to_shape(str(c.geom.geom_wkb))
+            pnt_shp = gis_util.wkt_to_shape(pos_wkt)
+            if gis_util.get_intersection(c_shp, pnt_shp):
+                return c
+        return None
+    get_stat_area_for_pos = get_stat_area_for_pos_spatial_hash
 
     def get_obj_for_pos(self, clazz, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
 
         # Use indices to speed things up...
         engine_url = self.dao.session.connection().engine.url
+        q = self.dao.session.query(clazz)
+        q = q.filter(func.ST_Contains(
+            clazz.geom, func.ST_GeomFromText(pos_wkt, 4326)))
         if 'sqlite' in engine_url.drivername:
             table = clazz.__name__.lower()
             search_frame = literal_column('BuildCircleMbr(%s, %s, 1)' % (lon, lat))
@@ -529,11 +572,10 @@ class SASIGridderTask(task_manager.Task):
                     )
                 )
             ).subquery('idx_subq')
+            q = q.join(subq, clazz.id == subq.c.id)
+        #@TODO: add geodb indices.
+        objs = q.all()
 
-            q = self.dao.session.query(clazz).join(subq, clazz.id == subq.c.id)
-            q = q.filter(func.ST_Contains(
-                clazz.geom, func.ST_GeomFromText(pos_wkt, 4326)))
-            objs = q.all()
         if objs:
             return objs[0]
         return None
@@ -622,6 +664,14 @@ class SASIGridderTask(task_manager.Task):
         ) 
         ingestor.ingest()
         self.commit()
+
+        # Add stat areas to spatial hash and to lookup.
+        for sa in self.dao.session.query(
+            self.dao.schema['sources']['StatArea']):
+            sa_shape = gis_util.wkb_to_shape(str(sa.geom.geom_wkb))
+            sa_mbr = gis_util.get_shape_mbr(sa_shape)
+            self.sa_spatial_hash.add_rect(sa_mbr, sa)
+            self.sa_by_id[sa.id] = sa
 
     def get_cracked_cells_for_stat_area(self, stat_area):
         cracked_cells = []

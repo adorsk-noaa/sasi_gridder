@@ -2,16 +2,15 @@
 Task for gridding SASI Efforts.
 """
 
-# TODO: use custom dao for adding nemareas.
-from sasi_gridder.dao import SASIGridderDAO
 from sasi_gridder import models as models
-import task_manager
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import func 
-from sqlalchemy.sql import literal_column, select, and_
-import sasi_data.ingestors as ingestors
+from sasi_data.ingestors.ingestor import Ingestor
+from sasi_data.ingestors.processor import Processor
+from sasi_data.ingestors.csv_reader import CSVReader
+from sasi_data.ingestors.shapefile_reader import ShapefileReader
+from sasi_data.ingestors.dict_writer import DictWriter 
+from sasi_data.ingestors.mapper import ClassMapper
 import sasi_data.util.gis as gis_util
+import task_manager
 
 import tempfile
 import os
@@ -82,8 +81,7 @@ class LoggerLogHandler(logging.Handler):
 
 class SASIGridderTask(task_manager.Task):
 
-    def __init__(self, config={}, data={}, 
-                 get_connection=None, max_mem=1e9, **kwargs):
+    def __init__(self, config={}, data={}, **kwargs):
         super(SASIGridderTask, self).__init__(**kwargs)
         self.logger.debug("RunSasiTask.__init__")
 
@@ -115,13 +113,6 @@ class SASIGridderTask(task_manager.Task):
             os_hndl, self.output_path = tempfile.mkstemp(
                 prefix="gridded_efforts.", suffix='.csv')
 
-        # Assign get_session function.
-        if not get_connection:
-            def get_connection():
-                engine = create_engine('sqlite://')
-                return engine.connect()
-        self.get_connection = get_connection
-
         self.message_logger = logging.getLogger("Task%s_msglogger" % id(self))
         main_log_handler = LoggerLogHandler(self.logger)
         main_log_handler.setFormatter(
@@ -136,40 +127,22 @@ class SASIGridderTask(task_manager.Task):
         # Create build dir.
         build_dir = tempfile.mkdtemp(prefix="gridderWork.")
 
-        self.con = self.get_connection()
-        self.trans = self.con.begin()
-        session = sessionmaker()(bind=self.con)
-
         # Create spatial hashes for cells and stat areas.
         # Cell size of about .1 (degrees) seems to work well.
         self.cell_spatial_hash = SpatialHash(cell_size=.1)
         self.sa_spatial_hash = SpatialHash(cell_size=.1)
-
-        # Create stat area id lookup.
-        self.sa_by_id = {}
 
         # Read in data.
         base_msg = "Ingesting..."
         ingest_logger = self.get_logger_logger('ingest', base_msg,
                                                self.logger)
         self.message_logger.info(base_msg)
-        self.dao = SASIGridderDAO(session=session)
 
-        # Read in cells and add to spatial hash.
+        # Read in cells.
         self.ingest_cells(parent_logger=ingest_logger, limit=None)
-
-        # Create dict to hold cell values.
-        self.c_values = {}
-        for cell in self.dao.query('__Cell'):
-            self.c_values[cell.id] = {}
 
         # Read in stat_areas.
         self.ingest_stat_areas(parent_logger=ingest_logger)
-
-        # Create dict to hold stat area values.
-        self.sa_values = {}
-        for stat_area in self.dao.query('__StatArea'):
-            self.sa_values[stat_area.id] = {}
 
         #
         #  Main part of the gridding task.
@@ -240,7 +213,8 @@ class SASIGridderTask(task_manager.Task):
             'ua': 0
         }
         
-        def first_pass(effort, effort_counter): 
+        def first_pass(data=None, **kwargs):
+            effort = data
             #if (effort_counter % 1e3) == 0:
             #    print ["%s: %.3e" % (k, v) for k,v in c_.items()]
 
@@ -271,7 +245,7 @@ class SASIGridderTask(task_manager.Task):
             # Otherwise if effort has a stat area...
             elif effort.stat_area_id is not None:
                 c_['sa'] += 1
-                stat_area = self.sa_by_id.get(effort.stat_area_id)
+                stat_area = self.stat_areas.get(effort.stat_area_id)
                 if not stat_area:
                     c_['sa_ua'] += 1
                     self.add_effort_to_unassigned(unassigned, effort)
@@ -286,51 +260,37 @@ class SASIGridderTask(task_manager.Task):
                 self.add_effort_to_unassigned(unassigned, effort)
                 return
 
-
-        # Define ingestor class to read raw efforts.
-        # The ingestor will execute the 'first_pass' function
-        # for each mapped record object.
-        class EffortIngestor(ingestors.CSV_Ingestor):
-            def __init__(self, *args, **kwargs):
-                super(EffortIngestor, self).__init__(*args, **kwargs)
-
-            def set_target_attr(self, target, attr, value):
-                setattr(target, attr, value)
-
-            def after_record_mapped(self, source_record, target_record, 
-                                    counter): 
-                first_pass(target_record, counter)
-            def initialize_target_record(self, counter):
-                return models.Effort()
-
-        # Create ingestor instance.
-        ingestor = EffortIngestor(
-            csv_file=self.raw_efforts_path,
-            mappings=[
-                {'source': 'trip_type', 'target': 'gear_id', 
-                 'processor': trip_type_to_gear_id},
-                {'source': 'year', 'target': 'time',
-                 'processor': float_w_empty_dot},
-                {'source': 'nemarea', 'target': 'stat_area_id',
-                 'processor': float_w_empty_dot},
-                {'source': 'A', 'target': 'a',
-                 'processor': float_w_empty_dot},
-                {'source': 'value', 'target': 'value',
-                 'processor': float_w_empty_dot},
-                {'source': 'hours_fished', 'target': 'hours_fished',
-                 'processor': float_w_empty_dot},
-                {'source': 'lat', 'target': 'lat', 
-                 'processor': float_w_empty_dot},
-                {'source': 'lon', 'target': 'lon',
-                 'processor': float_w_empty_dot}
+        # Create and run effort ingestor.
+        ingestor = Ingestor(
+            reader=CSVReader(csv_file=self.raw_efforts_path),
+            processors=[
+                ClassMapper(
+                    clazz=models.Effort,
+                    mappings=[
+                        {'source': 'trip_type', 'target': 'gear_id', 
+                         'processor': trip_type_to_gear_id},
+                        {'source': 'year', 'target': 'time',
+                         'processor': float_w_empty_dot},
+                        {'source': 'nemarea', 'target': 'stat_area_id',
+                         'processor': float_w_empty_dot},
+                        {'source': 'A', 'target': 'a',
+                         'processor': float_w_empty_dot},
+                        {'source': 'value', 'target': 'value',
+                         'processor': float_w_empty_dot},
+                        {'source': 'hours_fished', 'target': 'hours_fished',
+                         'processor': float_w_empty_dot},
+                        {'source': 'lat', 'target': 'lat', 
+                         'processor': float_w_empty_dot},
+                        {'source': 'lon', 'target': 'lon',
+                         'processor': float_w_empty_dot}
+                    ],
+                ),
+                first_pass,
             ],
             logger=fp_logger,
             get_count=True,
             #limit=1e3
-        ) 
-
-        # Run the ingestor, and thus do the first pass.
-        ingestor.ingest()
+        ).ingest() 
 
         # 
         # 2. For each effort assigned to a stat area,
@@ -350,12 +310,10 @@ class SASIGridderTask(task_manager.Task):
                                               gridding_logger)
         sa_logger.info(base_msg)
 
-        stat_areas = self.dao.session.query(
-            self.dao.schema['sources']['StatArea'])
-        num_stat_areas = stat_areas.count()
+        num_stat_areas = len(self.stat_areas)
         logging_interval = 1
         sa_counter = 0
-        for stat_area in stat_areas:
+        for stat_area in self.stat_areas.values():
             sa_counter += 1
             if (sa_counter % logging_interval) == 0:
                 sa_logger.info("stat_area %s of %s (%.1f%%)" % (
@@ -363,7 +321,7 @@ class SASIGridderTask(task_manager.Task):
                     100.0 * sa_counter/num_stat_areas))
 
             # Get stat area values.
-            sa_keyed_values = self.sa_values[stat_area.id]
+            sa_keyed_values = self.sa_values.setdefault(stat_area.id, {})
 
             # Get list of cracked cells.
             cracked_cells = self.get_cracked_cells_for_stat_area(stat_area)
@@ -383,7 +341,8 @@ class SASIGridderTask(task_manager.Task):
             # cells, in proportion to the cracked cell's values as a
             # percentage of the stat area's cracked cell totals.
             for ccell in cracked_cells:
-                pcell_keyed_values = self.c_values[ccell.parent_cell.id]
+                pcell_keyed_values = self.c_values.setdefault(
+                    ccell.parent_cell.id, {})
                 for effort_key, sa_values in sa_keyed_values.items():
                     ccell_totals_values = ccell_totals.get(effort_key)
                     ccell_values = ccell.keyed_values.get(effort_key)
@@ -431,11 +390,9 @@ class SASIGridderTask(task_manager.Task):
 
         # Calculate totals across all cells.
         totals = {}
-        cells = self.dao.session.query(
-            self.dao.schema['sources']['Cell'])
-        num_cells = cells.count()
-        for cell in cells:
-            cell_keyed_values = self.c_values[cell.id]
+        num_cells = len(self.cells)
+        for cell in self.cells.values():
+            cell_keyed_values = self.c_values.setdefault(cell.id, {})
             for effort_key, cell_values in cell_keyed_values.items():
                 totals_values = totals.setdefault(
                     effort_key, 
@@ -448,14 +405,15 @@ class SASIGridderTask(task_manager.Task):
         # in proportion to the cell's values as a percentage of the total.
         logging_interval = 1e3
         cell_counter = 0
-        for cell in cells:
+        for cell in self.cells.values():
             cell_counter += 1
             if (cell_counter % logging_interval) == 0:
                 unassigned_logger.info("cell %s of %s (%.1f%%)" % (
                     cell_counter, num_cells, 100.0 * cell_counter/num_cells))
 
+            cell_keyed_values = self.c_values.setdefault(cell.id, {})
             for effort_key, unassigned_values in unassigned.items():
-                cell_values = self.c_values[cell.id].get(effort_key)
+                cell_values = cell_keyed_values.get(effort_key)
                 if not cell_values:
                     continue
                 for attr, unassigned_value in unassigned_values.items():
@@ -480,9 +438,7 @@ class SASIGridderTask(task_manager.Task):
         fields = ['cell_id'] + self.key_attrs + self.value_attrs
         w.writerow(fields)
 
-        cells = self.dao.session.query(
-            self.dao.schema['sources']['Cell'])
-        for cell in cells:
+        for cell in self.cells.values():
             cell_keyed_values = self.c_values[cell.id]
             for keys, values in cell_keyed_values.items():
                 row_dict = {
@@ -511,14 +467,7 @@ class SASIGridderTask(task_manager.Task):
         logger.setLevel(self.message_logger.level)
         return logger
 
-    def get_cell_for_pos_db(self, lat, lon):
-        """ Get cell which contains a given lat lon.
-        Returns None if no cell could be found.
-        Via the db."""
-        Cell = self.dao.schema['sources']['Cell']
-        return self.get_obj_for_pos(Cell, lat, lon)
-
-    def get_cell_for_pos_spatial_hash(self, lat, lon):
+    def get_cell_for_pos(self, lat, lon):
         """
         Get cell which contains given point, via
         spatial hash.
@@ -526,60 +475,19 @@ class SASIGridderTask(task_manager.Task):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
         candidates = self.cell_spatial_hash.items_for_point((lon,lat))
         for c in candidates:
-            c_shp = gis_util.wkb_to_shape(str(c.geom.geom_wkb))
             pnt_shp = gis_util.wkt_to_shape(pos_wkt)
-            if gis_util.get_intersection(c_shp, pnt_shp):
+            if gis_util.get_intersection(c.shape, pnt_shp):
                 return c
         return None
-    get_cell_for_pos = get_cell_for_pos_spatial_hash
 
-    def get_stat_area_for_pos_db(self, lat, lon):
-        """ Get statarea which contains a given lat lon.
-        Returns None if no StatArea could be found."""
-        StatArea = self.dao.schema['sources']['StatArea']
-        return self.get_obj_for_pos(StatArea, lat, lon)
-
-    def get_stat_area_for_pos_spatial_hash(self, lat, lon):
+    def get_stat_area_for_pos(self, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
         candidates = self.sa_spatial_hash.items_for_point((lon,lat))
         for c in candidates:
-            c_shp = gis_util.wkb_to_shape(str(c.geom.geom_wkb))
             pnt_shp = gis_util.wkt_to_shape(pos_wkt)
-            if gis_util.get_intersection(c_shp, pnt_shp):
+            if gis_util.get_intersection(c.shape, pnt_shp):
                 return c
         return None
-    get_stat_area_for_pos = get_stat_area_for_pos_spatial_hash
-
-    def get_obj_for_pos(self, clazz, lat, lon):
-        pos_wkt = 'POINT(%s %s)' % (lon, lat)
-
-        # Use indices to speed things up...
-        engine_url = self.dao.session.connection().engine.url
-        q = self.dao.session.query(clazz)
-        q = q.filter(func.ST_Contains(
-            clazz.geom, func.ST_GeomFromText(pos_wkt, 4326)))
-        if 'sqlite' in engine_url.drivername:
-            table = clazz.__name__.lower()
-            search_frame = literal_column('BuildCircleMbr(%s, %s, 1)' % (lon, lat))
-            subq = self.dao.session.query(clazz.id).filter(
-                literal_column('ROWID').in_(
-                    select(
-                        ["ROWID FROM SpatialIndex"],
-                        and_(
-                            (literal_column('f_table_name') == table),
-                            (literal_column('search_frame') == search_frame),
-                        )
-                    )
-                )
-            ).subquery('idx_subq')
-            q = q.join(subq, clazz.id == subq.c.id)
-        #@TODO: add geodb indices.
-        objs = q.all()
-
-        if objs:
-            return objs[0]
-        return None
-
 
     def new_values_dict(self):
         return dict(zip(self.value_attrs, [0.0] * len(self.value_attrs)))
@@ -599,11 +507,11 @@ class SASIGridderTask(task_manager.Task):
         self.update_values_dict(values, effort)
 
     def add_effort_to_cell(self, cell, effort):
-        cell_keyed_values = self.c_values[cell.id]
+        cell_keyed_values = self.c_values.setdefault(cell.id, {})
         self.add_effort_to_keyed_values_dict(cell_keyed_values, effort)
 
     def add_effort_to_stat_area(self, stat_area, effort):
-        sa_keyed_values = self.sa_values[stat_area.id]
+        sa_keyed_values = self.sa_values.setdefault(stat_area.id, {})
         self.add_effort_to_keyed_values_dict(sa_keyed_values, effort)
 
     def add_effort_to_unassigned(self, unassigned, effort):
@@ -614,78 +522,75 @@ class SASIGridderTask(task_manager.Task):
         return tuple([getattr(effort, attr, None) for attr in self.key_attrs])
 
     def ingest_cells(self, parent_logger=None, limit=None):
+        self.cells = {}
+        self.cell_spatial_hash = SpatialHash(cell_size=.1)
+        self.c_values = {}
         logger = self.get_logger_logger(
             name='cell_ingest', 
             base_msg='Ingesting cells...',
             parent_logger=parent_logger
         )
-        ingestor = ingestors.Shapefile_Ingestor(
-            dao=self.dao,
-            shp_file=self.grid_path,
-            clazz=self.dao.schema['sources']['Cell'],
-            reproject_to='EPSG:4326',
-            mappings=[
-                {'source': 'TYPE', 'target': 'type'},
-                {'source': 'TYPE_ID', 'target': 'type_id'},
+
+        Ingestor(
+            reader=ShapefileReader(shp_file=self.grid_path,
+                                   reproject_to='EPSG:4326'),
+            processors=[
+                ClassMapper(
+                    clazz=models.Cell,
+                    mappings=[{'source': 'ID', 'target': 'id'},
+                              {'source': '__shape', 'target': 'shape'},],
+                ),
+                DictWriter(dict_=self.cells, key_func=lambda c: c.id),
             ],
             logger=logger,
-            commit_interval=None,
             limit=limit
-        ) 
-        ingestor.ingest()
-        self.commit()
+        ).ingest()
 
         # Calculate cell areas and add cells to spatial hash.
-        for cell in self.dao.session.query(
-            self.dao.schema['sources']['Cell']):
-            cell_shape = gis_util.wkb_to_shape(str(cell.geom.geom_wkb))
-            cell.area = gis_util.get_shape_area(cell_shape)
-            cell_mbr = gis_util.get_shape_mbr(cell_shape)
-            self.cell_spatial_hash.add_rect(cell_mbr, cell)
-            self.dao.save(cell, commit=False)
-        self.commit()
+        for cell in self.cells.values():
+            cell.area = gis_util.get_shape_area(cell.shape)
+            cell.mbr = gis_util.get_shape_mbr(cell.shape)
+            self.cell_spatial_hash.add_rect(cell.mbr, cell)
 
-    def ingest_stat_areas(self, parent_logger=None):
+    def ingest_stat_areas(self, parent_logger=None, limit=None):
+        self.stat_areas = {}
+        self.sa_spatial_hash = SpatialHash(cell_size=.1)
+        self.sa_values = {}
         logger = self.get_logger_logger(
             name='stat_area_ingest', 
             base_msg='Ingesting stat_areas...',
             parent_logger=parent_logger
         )
-        ingestor = ingestors.Shapefile_Ingestor(
-            dao=self.dao,
-            shp_file=self.stat_areas_path,
-            clazz=self.dao.schema['sources']['StatArea'],
-            reproject_to='EPSG:4326',
-            mappings=[
-                {'source': 'SAREA', 'target': 'id'},
+
+        Ingestor(
+            reader=ShapefileReader(shp_file=self.stat_areas_path,
+                                   reproject_to='EPSG:4326'),
+            processors=[
+                ClassMapper(
+                    clazz=models.StatArea,
+                    mappings=[{'source': 'SAREA', 'target': 'id'},
+                              {'source': '__shape', 'target': 'shape'},],
+                ),
+                DictWriter(dict_=self.stat_areas, key_func=lambda sa: sa.id),
             ],
             logger=logger,
-            commit_interval=None,
-        ) 
-        ingestor.ingest()
-        self.commit()
+            limit=limit
+        ).ingest()
 
-        # Add stat areas to spatial hash and to lookup.
-        for sa in self.dao.session.query(
-            self.dao.schema['sources']['StatArea']):
-            sa_shape = gis_util.wkb_to_shape(str(sa.geom.geom_wkb))
-            sa_mbr = gis_util.get_shape_mbr(sa_shape)
-            self.sa_spatial_hash.add_rect(sa_mbr, sa)
-            self.sa_by_id[sa.id] = sa
+        # Add to spatial hash.
+        for stat_area in self.stat_areas.values():
+            stat_area.mbr = gis_util.get_shape_mbr(stat_area.shape)
+            self.sa_spatial_hash.add_rect(stat_area.mbr, stat_area)
 
     def get_cracked_cells_for_stat_area(self, stat_area):
         cracked_cells = []
-        Cell = self.dao.schema['sources']['Cell']
-        intersecting_cells = self.dao.session.query(Cell).filter(
-            stat_area.geom.intersects(Cell.geom))
-        for icell in intersecting_cells:
-            intersection = gis_util.get_intersection(
-                gis_util.wkb_to_shape(str(stat_area.geom.geom_wkb)),
-                gis_util.wkb_to_shape(str(icell.geom.geom_wkb)),
-            )
-            intersection_area = gis_util.get_shape_area(
-                intersection)
+        candidates = self.cell_spatial_hash.items_for_rect(stat_area.mbr)
+        for icell in candidates:
+            intersection = gis_util.get_intersection(stat_area.shape, icell.shape)
+            if not intersection:
+                continue
 
+            intersection_area = gis_util.get_shape_area(intersection)
             pct_area = intersection_area/icell.area
 
             # Set cracked cell values in proportion to percentage
@@ -703,15 +608,3 @@ class SASIGridderTask(task_manager.Task):
                 keyed_values=ccell_keyed_values,
             ))
         return cracked_cells
-
-    def print_cells(self):
-        """ Utility method for debugging. """
-        cells = self.dao.session.query(
-            self.dao.schema['sources']['Cell'])
-        for cell in cells:
-            print id(cell), cell.__dict__
-
-    def commit(self):
-        self.dao.commit()
-        self.trans.commit()
-        self.trans = self.con.begin()

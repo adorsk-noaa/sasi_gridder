@@ -1,7 +1,6 @@
 from sasi_gridder.sasi_gridder_task import SASIGridderTask
 from sasi_data.util import data_generators as dg
 import sasi_data.util.shapefile as shapefile_util
-from sqlalchemy import create_engine
 import sys
 import unittest
 import logging
@@ -64,6 +63,7 @@ class SASIGridderTestCase(unittest.TestCase):
         records = []
         i = 0
         for coord_set in coord_sets:
+            i += 1
             records.append({
                 'id': i,
                 'geometry': {
@@ -74,7 +74,6 @@ class SASIGridderTestCase(unittest.TestCase):
                     'ID': i
                 }
             })
-            i += 1
         return clz.generate_shapefile(shpfile=shpfile, schema=schema,
                                       records=records)
 
@@ -136,28 +135,12 @@ class SASIGridderTestCase(unittest.TestCase):
         w.writerow(fields)
         for r in records:
             r['trip_type'] = 'otter'
+            r['year'] = '1'
             w.writerow([r.get(f) for f in fields])
         csv_file.close()
         return csv_path
 
     def test_gridder_task(self):
-
-        if platform.system() == 'Java':
-            def get_connection():
-                engine = create_engine('h2+zxjdbc:///mem:')
-                con = engine.connect()
-                javaCon = con.connection.__connection__
-                from geodb.GeoDB import InitGeoDB
-                InitGeoDB(javaCon)
-                return con
-        else:
-            def get_connection():
-                import pyspatialite
-                sys.modules['pysqlite2'] = pyspatialite
-                engine = create_engine('sqlite://')
-                con = engine.connect()
-                con.execute('SELECT InitSpatialMetadata()')
-                return con
 
         logger = logging.getLogger('test_gridder_task')
         logger.addHandler(logging.StreamHandler())
@@ -165,7 +148,6 @@ class SASIGridderTestCase(unittest.TestCase):
 
         output_path = os.path.join(self.tmp_dir, "output.csv")
         task = SASIGridderTask(
-            get_connection=get_connection,
             logger=logger,
             raw_efforts_path=self.raw_efforts_path,
             grid_path=self.grid_path,
@@ -176,12 +158,13 @@ class SASIGridderTestCase(unittest.TestCase):
         output_file = open(output_path, "rb")
         reader = csv.DictReader(output_file)
         results = [r for r in reader]
+        results.sort(key=lambda r: r['cell_id'])
         output_file.close()
         self.assertEquals(
             results, 
             [
-                {'a': '8.0', 'cell_id': '1', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0'},
-                {'a': '4.0', 'cell_id': '2', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0'}
+                {'a': '8.0', 'cell_id': '1', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0', 'time': '1.0'},
+                {'a': '4.0', 'cell_id': '2', 'gear_id': 'GC10', 'hours_fished': '0.0', 'value': '0.0', 'time': '1.0'}
             ]
         )
 

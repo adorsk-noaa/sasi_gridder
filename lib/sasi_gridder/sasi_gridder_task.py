@@ -9,6 +9,7 @@ from sasi_data.ingestors.csv_reader import CSVReader
 from sasi_data.ingestors.shapefile_reader import ShapefileReader
 from sasi_data.ingestors.dict_writer import DictWriter 
 from sasi_data.ingestors.mapper import ClassMapper
+from sasi_data.util.spatial_hash import SpatialHash
 import sasi_data.util.gis as gis_util
 import task_manager
 
@@ -18,56 +19,12 @@ import shutil
 import zipfile
 import logging
 import csv
-from math import floor
 from time import time
 import inspect
 
 def ln_(msg=""):
     return "%s (%s)" % (msg, inspect.currentframe().f_back.f_lineno)
 
-class SpatialHash(object):
-    def __init__(self, cell_size=.05):
-        self.cell_size = float(cell_size)
-        self.d = {}
-
-    def _add(self, cell_coord, o):
-        """Add the object o to the cell at cell_coord."""
-        try:
-            self.d.setdefault(cell_coord, set()).add(o)
-        except KeyError:
-            self.d[cell_coord] = set((o,))
-
-    def _cell_for_point(self, p):
-        cx = floor(p[0]/self.cell_size)
-        cy = floor(p[1]/self.cell_size)
-        return (int(cx), int(cy))
-
-    def _cells_for_rect(self, r):
-        cells = set()
-        cy = floor(r[1] / self.cell_size)
-        while (cy * self.cell_size) <= r[3]:
-            cx = floor(r[0] / self.cell_size)
-            while (cx * self.cell_size) <= r[2]:
-                cells.add((int(cx), int(cy)))
-                cx += 1.0
-            cy += 1.0
-        return cells
-
-    def add_rect(self, r, obj):
-        cells = self._cells_for_rect(r)
-        for c in cells:
-            self._add(c, obj)
-
-    def items_for_point(self, p):
-        cell = self._cell_for_point(p)
-        return self.d.get(cell, set())
-
-    def items_for_rect(self, r):
-        cells = self._cells_for_rect(r)
-        items = set()
-        for c in cells:
-            items.update(self.d.get(c, set()))
-        return items
 
 class LoggerLogHandler(logging.Handler):
     """ Custom log handler that logs messages to another
@@ -126,11 +83,6 @@ class SASIGridderTask(task_manager.Task):
 
         # Create build dir.
         build_dir = tempfile.mkdtemp(prefix="gridderWork.")
-
-        # Create spatial hashes for cells and stat areas.
-        # Cell size of about .1 (degrees) seems to work well.
-        self.cell_spatial_hash = SpatialHash(cell_size=.1)
-        self.sa_spatial_hash = SpatialHash(cell_size=.1)
 
         # Read in data.
         base_msg = "Ingesting..."

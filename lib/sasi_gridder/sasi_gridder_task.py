@@ -25,6 +25,17 @@ import inspect
 def ln_(msg=""):
     return "%s (%s)" % (msg, inspect.currentframe().f_back.f_lineno)
 
+class Timer(object):
+    def __init__(self):
+        self.then = 0
+        self.now = 0
+    def diff(self):
+        return
+        self.then = self.now
+        self.now = time()
+        return self.now - self.then
+
+timer = Timer()
 
 class LoggerLogHandler(logging.Handler):
     """ Custom log handler that logs messages to another
@@ -100,7 +111,7 @@ class SASIGridderTask(task_manager.Task):
         #  Main part of the gridding task.
         #   
 
-        base_msg = "Starting gridding."
+        base_msg = "Gridding."
         gridding_logger = self.get_logger_logger('gridding', base_msg,
                                                   self.logger)
         self.message_logger.info(base_msg)
@@ -166,50 +177,51 @@ class SASIGridderTask(task_manager.Task):
         }
         
         def first_pass(data=None, **kwargs):
-            effort = data
+            #effort = data
+
             #if (effort_counter % 1e3) == 0:
             #    print ["%s: %.3e" % (k, v) for k,v in c_.items()]
 
             # If effort has lat and lon...
-            if effort.lat is not None and effort.lon is not None:
+            if data.lat is not None and data.lon is not None:
                 c_['ll'] += 1
                 # Can effort can be assigned to cell?
-                cell = self.get_cell_for_pos(effort.lat, effort.lon)
+                cell = self.get_cell_for_pos(data.lat, data.lon)
                 if cell:
                     c_['ll_c'] += 1
-                    self.add_effort_to_cell(cell, effort)
+                    self.add_effort_to_cell(cell, data)
                     return
 
                 # Otherwise can effort can be assigned to statarea?
                 stat_area = self.get_stat_area_for_pos(
-                    effort.lat, effort.lon)
+                    data.lat, data.lon)
                 if stat_area:
                     c_['ll_sa'] += 1
-                    self.add_effort_to_stat_area(stat_area, effort)
+                    self.add_effort_to_stat_area(stat_area, data)
                     return
 
                 # Otherwise add to unassigned.
                 else:
                     c_['ll_ua'] += 1
-                    self.add_effort_to_unassigned(unassigned, effort)
+                    self.add_effort_to_unassigned(unassigned, data)
                     return
 
             # Otherwise if effort has a stat area...
-            elif effort.stat_area_id is not None:
+            elif data.stat_area_id is not None:
                 c_['sa'] += 1
-                stat_area = self.stat_areas.get(effort.stat_area_id)
+                stat_area = self.stat_areas.get(data.stat_area_id)
                 if not stat_area:
                     c_['sa_ua'] += 1
-                    self.add_effort_to_unassigned(unassigned, effort)
+                    self.add_effort_to_unassigned(unassigned, data)
                     return
                 else:
-                    self.add_effort_to_stat_area(stat_area, effort)
+                    self.add_effort_to_stat_area(stat_area, data)
                     return
 
             # Otherwise add to unassigned list.
             else:
                 c_['ua'] += 1
-                self.add_effort_to_unassigned(unassigned, effort)
+                self.add_effort_to_unassigned(unassigned, data)
                 return
 
         # Create and run effort ingestor.
@@ -385,22 +397,21 @@ class SASIGridderTask(task_manager.Task):
         #
         # Output gridded efforts.
         #
-        csv_file = open(self.output_path, "w")
-        w = csv.writer(csv_file)
-        fields = ['cell_id'] + self.key_attrs + self.value_attrs
-        w.writerow(fields)
+        with open(self.output_path, "w") as f:
+            w = csv.writer(f)
+            fields = ['cell_id'] + self.key_attrs + self.value_attrs
+            w.writerow(fields)
 
-        for cell in self.cells.values():
-            cell_keyed_values = self.c_values[cell.id]
-            for keys, values in cell_keyed_values.items():
-                row_dict = {
-                    'cell_id': cell.id
-                }
-                for i in range(len(self.key_attrs)):
-                    row_dict[self.key_attrs[i]] = keys[i]
-                row_dict.update(values)
-                w.writerow([row_dict[f] for f in fields])
-        csv_file.close()
+            for cell in self.cells.values():
+                cell_keyed_values = self.c_values[cell.id]
+                for keys, values in cell_keyed_values.items():
+                    row_dict = {
+                        'cell_id': cell.id
+                    }
+                    for i in range(len(self.key_attrs)):
+                        row_dict[self.key_attrs[i]] = keys[i]
+                    row_dict.update(values)
+                    w.writerow([row_dict[f] for f in fields])
 
         shutil.rmtree(build_dir)
 

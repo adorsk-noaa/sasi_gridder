@@ -425,18 +425,18 @@ class SASIGridderTask(task_manager.Task):
         spatial hash.
         """
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
+        pnt_shp = gis_util.wkt_to_shape(pos_wkt)
         candidates = self.cell_spatial_hash.items_for_point((lon,lat))
         for c in candidates:
-            pnt_shp = gis_util.wkt_to_shape(pos_wkt)
             if gis_util.get_intersection(c.shape, pnt_shp):
                 return c
         return None
 
     def get_stat_area_for_pos(self, lat, lon):
         pos_wkt = 'POINT(%s %s)' % (lon, lat)
+        pnt_shp = gis_util.wkt_to_shape(pos_wkt)
         candidates = self.sa_spatial_hash.items_for_point((lon,lat))
         for c in candidates:
-            pnt_shp = gis_util.wkt_to_shape(pos_wkt)
             if gis_util.get_intersection(c.shape, pnt_shp):
                 return c
         return None

@@ -7,7 +7,8 @@ from javax.swing.filechooser import FileNameExtensionFilter
 from javax.swing.border import EmptyBorder
 from java.awt import (Component, BorderLayout)
 from java.awt.event import AdjustmentListener
-import layout.SpringUtilities as SpringUtilities
+#import layout.SpringUtilities as SpringUtilities
+import spring_utilities as SpringUtilities
 import os
 import csv
 import logging
@@ -76,14 +77,6 @@ class JythonGui(object):
         self.logScrollPane = JScrollPane(self.log)
         self.logScrollPane.setVerticalScrollBarPolicy(
             JScrollPane.VERTICAL_SCROLLBAR_ALWAYS)
-        # Add listener to do auto scrolling..
-        class LogScrollListener(AdjustmentListener):
-            def adjustmentValueChanged(self, e):
-                adjustable = e.getAdjustable()
-                adjustable.setValue(adjustable.getMaximum())
-        self.logScrollPane.getVerticalScrollBar().addAdjustmentListener(
-            LogScrollListener())
-        
         self.log_panel.add(self.logScrollPane, BorderLayout.CENTER)
 
         # File selectors
@@ -97,6 +90,7 @@ class JythonGui(object):
 
     def log_msg(self, msg):
         self.log.append(msg + "\n")
+        self.log.setCaretPosition(self.log.getDocument().getLength())
 
     def openInputChooser(self, event):
         ret = self.inputChooser.showOpenDialog(self.frame)

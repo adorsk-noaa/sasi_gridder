@@ -59,8 +59,7 @@ class SASIGridderTask(task_manager.Task):
         self.key_attrs = ['gear_id', 'time']
 
         # Define trip type to gear code mappings.
-        # @TODO: put this in config.
-        self.trip_type_gear_mappings = {
+        self.trip_type_gear_mappings = kwargs.get('gear_mappings', {
             'hy_drg': 'GC30',
             'otter': 'GC10',
             'sca-gc': 'GC21',
@@ -71,10 +70,10 @@ class SASIGridderTask(task_manager.Task):
             'trap': 'GC60',
             'gillne': 'GC50',
             'longli': 'GC40',
-        }
+        })
 
         for kwarg in ['raw_efforts_path', 'grid_path', 'stat_areas_path',
-                      'output_path']:
+                      'output_path', 'effort_limit']:
             setattr(self, kwarg, kwargs.get(kwarg))
 
         if not self.output_path:
@@ -166,16 +165,6 @@ class SASIGridderTask(task_manager.Task):
 
         # Define function to execute after each raw effort is mapped to an
         # effort column. This is the first pass described above.
-        c_ = {
-            'll': 0,
-            'll_c': 0,
-            'll_sa': 0,
-            'll_ua': 0,
-            'sa': 0,
-            'sa_ua': 0,
-            'ua': 0
-        }
-        
         def first_pass(data=None, **kwargs):
             #effort = data
 
@@ -184,11 +173,9 @@ class SASIGridderTask(task_manager.Task):
 
             # If effort has lat and lon...
             if data.lat is not None and data.lon is not None:
-                c_['ll'] += 1
                 # Can effort can be assigned to cell?
                 cell = self.get_cell_for_pos(data.lat, data.lon)
                 if cell:
-                    c_['ll_c'] += 1
                     self.add_effort_to_cell(cell, data)
                     return
 
@@ -196,22 +183,18 @@ class SASIGridderTask(task_manager.Task):
                 stat_area = self.get_stat_area_for_pos(
                     data.lat, data.lon)
                 if stat_area:
-                    c_['ll_sa'] += 1
                     self.add_effort_to_stat_area(stat_area, data)
                     return
 
                 # Otherwise add to unassigned.
                 else:
-                    c_['ll_ua'] += 1
                     self.add_effort_to_unassigned(unassigned, data)
                     return
 
             # Otherwise if effort has a stat area...
             elif data.stat_area_id is not None:
-                c_['sa'] += 1
                 stat_area = self.stat_areas.get(data.stat_area_id)
                 if not stat_area:
-                    c_['sa_ua'] += 1
                     self.add_effort_to_unassigned(unassigned, data)
                     return
                 else:
@@ -220,7 +203,6 @@ class SASIGridderTask(task_manager.Task):
 
             # Otherwise add to unassigned list.
             else:
-                c_['ua'] += 1
                 self.add_effort_to_unassigned(unassigned, data)
                 return
 
@@ -253,7 +235,7 @@ class SASIGridderTask(task_manager.Task):
             ],
             logger=fp_logger,
             get_count=True,
-            #limit=1e3
+            limit=self.effort_limit,
         ).ingest() 
 
         # 
@@ -305,8 +287,7 @@ class SASIGridderTask(task_manager.Task):
             # cells, in proportion to the cracked cell's values as a
             # percentage of the stat area's cracked cell totals.
             for ccell in cracked_cells:
-                pcell_keyed_values = self.c_values.setdefault(
-                    ccell.parent_cell.id, {})
+                pcell_keyed_values = self.c_values[ccell.parent_cell.id]
                 for effort_key, sa_values in sa_keyed_values.items():
                     ccell_totals_values = ccell_totals.get(effort_key)
                     ccell_values = ccell.keyed_values.get(effort_key)
@@ -356,7 +337,7 @@ class SASIGridderTask(task_manager.Task):
         totals = {}
         num_cells = len(self.cells)
         for cell in self.cells.values():
-            cell_keyed_values = self.c_values.setdefault(cell.id, {})
+            cell_keyed_values = self.c_values[cell.id]
             for effort_key, cell_values in cell_keyed_values.items():
                 totals_values = totals.setdefault(
                     effort_key, 
@@ -375,7 +356,7 @@ class SASIGridderTask(task_manager.Task):
                 unassigned_logger.info("cell %s of %s (%.1f%%)" % (
                     cell_counter, num_cells, 100.0 * cell_counter/num_cells))
 
-            cell_keyed_values = self.c_values.setdefault(cell.id, {})
+            cell_keyed_values = self.c_values[cell.id]
             for effort_key, unassigned_values in unassigned.items():
                 cell_values = cell_keyed_values.get(effort_key)
                 if not cell_values:
@@ -470,7 +451,7 @@ class SASIGridderTask(task_manager.Task):
         self.update_values_dict(values, effort)
 
     def add_effort_to_cell(self, cell, effort):
-        cell_keyed_values = self.c_values.setdefault(cell.id, {})
+        cell_keyed_values = self.c_values[cell.id]
         self.add_effort_to_keyed_values_dict(cell_keyed_values, effort)
 
     def add_effort_to_stat_area(self, stat_area, effort):
@@ -509,11 +490,13 @@ class SASIGridderTask(task_manager.Task):
             limit=limit
         ).ingest()
 
-        # Calculate cell areas and add cells to spatial hash.
+        # Calculate cell areas and add cells to spatial hash,
+        # and initialize c_values.
         for cell in self.cells.values():
             cell.area = gis_util.get_shape_area(cell.shape)
             cell.mbr = gis_util.get_shape_mbr(cell.shape)
             self.cell_spatial_hash.add_rect(cell.mbr, cell)
+            self.c_values[cell.id] = {}
 
     def ingest_stat_areas(self, parent_logger=None, limit=None):
         self.stat_areas = {}

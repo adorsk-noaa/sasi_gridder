@@ -57,8 +57,8 @@ class SASIGridderTestCase(unittest.TestCase):
             }
         }
         coord_sets = [
-            [[dg.generate_polygon_coords(x=0, dx=2, y=-1, dy=1)]],
-            [[dg.generate_polygon_coords(x=0, dx=2, y=0, dy=1)]]
+            [[dg.generate_polygon_coords(x0=0, x1=2, y0=-1, y1=1)]],
+            [[dg.generate_polygon_coords(x0=0, x1=2, y0=0, y1=1)]]
         ]
         records = []
         i = 0
@@ -86,7 +86,7 @@ class SASIGridderTestCase(unittest.TestCase):
                 'SAREA': 'int'
             }
         }
-        coords = [[dg.generate_polygon_coords(x=1, dx=2, y=-1, dy=2)]]
+        coords = [[dg.generate_polygon_coords(x0=1, x1=2, y0=-1, y1=2)]]
         records = [{
             'id': 1,
             'geometry': {

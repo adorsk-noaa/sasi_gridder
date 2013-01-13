@@ -1,4 +1,5 @@
 assets
 cache
+mvn_cache
 dist
 build

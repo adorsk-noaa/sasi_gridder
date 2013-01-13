@@ -29,16 +29,16 @@ assets = {
         'source': 'https://github.com/adorsk/TaskManager.git',
         'path': 'lib/task_manager',
     },
-    'jython-full.jar' : {
+    'jython.jar' : {
         'type': 'rsync',
-        'source': '/home/adorsk/tools/jython/jython-dev/dist/jython-standalone.jar'
+        'source': '/home/adorsk/tools/jython/full_build/work/dist/jython-standalone.jar'
     },
-    'java-lib' : {
-        'type': 'rsync',
-        'source': '/home/adorsk/tools/jython/jython-dev/dist/javalib'
+   'spring_utilities.py' : {
+        'type': 'url',
+        'source': 'https://gist.github.com/raw/4524185/gistfile1.txt'
     },
-    'jenv-java-lib' : {
-        'type': 'rsync',
-        'source': '/home/adorsk/projects/noaa/jenv/javalib'
+    'jython_runner' : {
+        'type': 'git',
+        'source': 'https://github.com/adorsk/jython_runner.git'
     },
 }

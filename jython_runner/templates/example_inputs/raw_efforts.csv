@@ -1,0 +1,5 @@
+nemarea,trip_type,A,hours_fished,value,year,lat,lon
+,otter,1,1,1,1,0.5,0.5
+,otter,2,2,2,1,-0.5,0.5
+1,otter,3,3,3,1,,
+,otter,6,6,6,1,,

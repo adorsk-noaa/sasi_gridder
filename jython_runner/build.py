@@ -81,5 +81,17 @@ def main():
     subprocess.call('cp -r "%s"/*  %s' % (maven_cache_dir, javalib_dir),
                     shell=True)
 
+    # Documentation.
+    shutil.copytree(
+        os.path.join(templates_dir, "doc"),
+        os.path.join(base_dir, "doc")
+    )
+
+    # Example Inputs.
+    shutil.copytree(
+        os.path.join(templates_dir, "example_inputs"),
+        os.path.join(base_dir, "example_inputs")
+    )
+
 if __name__ == '__main__':
     main()

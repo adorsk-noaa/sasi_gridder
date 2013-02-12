@@ -1,0 +1,106 @@
+<html>
+<head></head>
+<body>
+
+<h2>Input Files Formatting Guide</h2>
+
+This page describes the format of input files for the SASI Gridder program.
+
+A set of example inputs is included with this documentation: <a href="example_inputs" target="_blank">example inputs</a> .
+
+<div class="section">
+    <h3>General Notes</h3>
+    <ul>
+        <li>Column names are case-sensitive.</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h3>Overall Input Layout</h3>
+    <div>
+        The SASI Gridder takes a single directory as an input. This directory should have the following layout:
+        <pre>
+        /
+         - gear_mappings.csv
+         - raw_efforts.csv
+         - grid /
+           - grid.dbf
+           - grid.prj
+           - grid.shp
+           - grid.shx
+         - stat_areas /
+           - stat_areas.dbf
+           - stat_areas.prj
+           - stat_areas.shp
+           - stat_areas.shx
+        </pre>
+
+        The format of each section of this directory will be described below.
+    </div>
+</div>
+
+<div class="section">
+    <h3>gear_mappings.csv</h3>
+    <div>
+        <div class="example">
+            Example: <a href="example_inputs/gear_mappings.csv">gear_mappings.csv</a>
+        </div>
+
+        <div>
+            This file contains mappings from trip_type codes to SASI gear codes. For example, 'otter == GC10'.
+
+            This file should be a CSV file with the following columns:
+            <pre>trip_type, gear_code</pre>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <a name="raw_efforts">
+    <h3>raw_efforts.csv</h3>
+    <div>
+        <div class="example">
+            Example: <a href="example_inputs/raw_efforts.csv">raw_efforts.csv</a>
+        </div>
+
+        <div>
+            This file contains raw efforts, typically generated as the 'vtr_a' output of Chad's <pre>SAS/Omnibus/VA/wet_model/a_create_vtr_a_macro.txt</pre> script.
+
+            This file should be a CSV file with the following columns:
+            <pre>nemarea, trip_type, A, hours_fished, value, year, lat, lon</pre>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h3>grid</h3>
+    <div>
+        <div class="example">
+            Example: <a href="example_inputs/grid" target="_blank">grid</a>
+        </div>
+
+        <div>
+            This directory contains the shapefile set for the SASI 100km cell grid.
+
+            The shapefile should have an 'ID' attribute that contains a numerical cell id. Other attributes will be ignored.
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h3>stat_areas</h3>
+    <div>
+        <div class="example">
+            Example: <a href="example_inputs/stat_areas" target="_blank">stat_areas</a>
+        </div>
+
+        <div>
+            This directory contains the shapefile set for statistical areas to be used for gridding.
+
+            The shapefile should have a 'SAREA' attribute that contains a numerical stat area ID. These SAREAs should correspond to to the 'nemarea' column in the <a href="#raw_efforts">raw_efforts.csv file.</a> Other attributes will be ignored.
+        </div>
+    </div>
+</div>
+
+</body>
+</html>

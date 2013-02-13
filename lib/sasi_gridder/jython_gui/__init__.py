@@ -66,7 +66,7 @@ class JythonGui(object):
             "SASI Gridder",
             defaultCloseOperation = WindowConstants.EXIT_ON_CLOSE,
         )
-        self.frame.size = (650, 400,)
+        self.frame.size = (650, 600,)
 
         self.main_panel = JPanel()
         self.main_panel.layout = BoxLayout(self.main_panel, BoxLayout.Y_AXIS)
@@ -106,7 +106,8 @@ class JythonGui(object):
             JButton("Specify output...", actionPerformed=self.openOutputChooser))
 
         # Run elements.
-        self.top_panel.add(getStageLabel("Run SASI Gridder:"))
+        self.top_panel.add(getStageLabel(
+            "Run SASI Gridder: (this might take a hwile"))
         self.run_button = JButton("Run...", actionPerformed=self.runSASIGridder)
         self.top_panel.add(self.run_button)
 

@@ -8,7 +8,7 @@ from javax.swing.filechooser import FileNameExtensionFilter
 from javax.swing.border import EmptyBorder
 from java.awt import (Component, BorderLayout, Color)
 from java.awt.event import AdjustmentListener
-from java.lang import (System, Runtime, Class)
+from java.lang import (System, Runtime, Class, ProcessBuilder)
 from java.io import File
 from java.net import URI
 import spring_utilities as SpringUtilities
@@ -38,7 +38,7 @@ def browseURI(uri):
         rt.exec('open "%s"' % uri)
     else:
         if osName.startswith("Windows"):
-            rt.exec('rundll32 url.dll,FileProtocolHandler "%s"' % uri)
+            ProcessBuilder(["cmd", "/C", "start", uri]).start()
         else:
             browsers = ["google-chrome", "firefox", "opera", "konqueror", 
                         "epiphany", "mozilla", "netscape" ]

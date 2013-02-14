@@ -3,7 +3,7 @@ import sys
 import os
 this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(this_dir, 'setuptools.egg'))
-from sasi_gridder import jython_gui
+import sasi_gridder_jython_gui as jython_gui
 
 def split_path(path):
     parts = []
